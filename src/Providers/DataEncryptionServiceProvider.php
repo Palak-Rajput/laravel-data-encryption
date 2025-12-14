@@ -40,9 +40,10 @@ class DataEncryptionServiceProvider extends ServiceProvider
             __DIR__.'/../../config/data-encryption.php' => config_path('data-encryption.php'),
         ], 'config');
         
-        $this->publishes([
-            __DIR__.'/../../database/migrations/' => database_path('migrations'),
-        ], 'migrations');
+       $this->publishes([
+    __DIR__.'/../database/migrations' => database_path('migrations'),
+], 'migrations');
+
         
         if ($this->app->runningInConsole()) {
             $this->commands([
