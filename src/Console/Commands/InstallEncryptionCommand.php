@@ -152,18 +152,19 @@ protected function addPropertiesToUserModel(&$content, $filePath)
         return;
     }
 
-    // Insert properties right after "use ...;" inside class
+    // Insert properties **inside the class**, after "use HasEncryptedFields;"
     $content = preg_replace_callback(
-        '/(use [^;]+;)/',
+        '/(class\s+\w+\s+extends\s+[^{]+\{)/',
         function ($matches) {
-            return $matches[1] . "\n\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
+            return $matches[1] . "\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
         },
         $content,
-        1 // only first match
+        1
     );
 
     File::put($filePath, $content);
 }
+
 
     
     protected function addEnvironmentVariables()
