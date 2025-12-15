@@ -11,6 +11,12 @@ return [
         'cipher' => env('ENCRYPTION_CIPHER', 'AES-256-CBC'),
         'key' => env('ENCRYPTION_KEY', env('APP_KEY')),
     ],
+     'encrypted_fields' => [
+        'App\Models\User' => ['email', 'phone'],
+    ],
+    'searchable_fields' => [
+        'App\Models\User' => ['email', 'phone'],
+    ],
     
     /*
     |--------------------------------------------------------------------------

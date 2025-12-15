@@ -35,24 +35,32 @@ trait HasEncryptedFields
         });
     }
     
-    public function encryptFields()
-    {
-        $encryptionService = app(EncryptionService::class);
-        $hashService = app(HashService::class);
-        
-        foreach (static::$encryptedFields as $field) {
-            if (isset($this->attributes[$field]) && !empty($this->attributes[$field])) {
-                // Encrypt the original value
-                $this->attributes[$field] = $encryptionService->encrypt($this->attributes[$field]);
-                
-                // Create hash for searching
-                $hashField = $field . '_hash';
-                if (in_array($field, static::$searchableHashFields)) {
-                    $this->attributes[$hashField] = $hashService->hash($this->original[$field] ?? $this->attributes[$field]);
-                }
+    // In src/Models/Trait/HasEncryptedFields.php
+public function encryptFields()
+{
+    $encryptionService = app(EncryptionService::class);
+    $hashService = app(HashService::class);
+    
+    foreach (static::$encryptedFields as $field) {
+        if (isset($this->attributes[$field]) && !empty($this->attributes[$field])) {
+            // Skip if already encrypted
+            if ($this->isEncrypted($this->attributes[$field])) {
+                continue;
+            }
+            
+            // Encrypt INTO THE ORIGINAL COLUMN
+            $this->attributes[$field] = $encryptionService->encrypt($this->attributes[$field]);
+            
+            // Create hash for searching
+            $hashField = $field . '_hash';
+            if (in_array($field, static::$searchableHashFields)) {
+                $this->attributes[$hashField] = $hashService->hash(
+                    $this->getOriginal($field) ?? $this->attributes[$field]
+                );
             }
         }
     }
+}
     
     public function decryptFields()
     {

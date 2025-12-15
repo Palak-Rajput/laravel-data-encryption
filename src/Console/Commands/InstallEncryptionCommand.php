@@ -10,13 +10,20 @@ class InstallEncryptionCommand extends Command
 {
     protected $signature = 'data-encryption:install 
                             {--models= : Comma-separated list of models to encrypt}
-                            {--fields= : Comma-separated list of fields to encrypt}';
+                            {--fields= : Comma-separated list of fields to encrypt}
+                            {--backup : Include backup columns in migration}';
     
     protected $description = 'Install the Data Encryption package';
     
     public function handle()
     {
         $this->info('🔐 Installing Laravel Data Encryption Package...');
+        $this->warn('⚠️  This package will ENCRYPT DATA IN-PLACE in your existing columns!');
+        
+        if (!$this->confirm('Have you backed up your database?', false)) {
+            $this->error('Installation cancelled. Please backup your database first.');
+            return 1;
+        }
         
         // Publish config
         $this->call('vendor:publish', [
@@ -51,7 +58,7 @@ class InstallEncryptionCommand extends Command
             $envContent = File::get($envPath);
             
             $variables = [
-                '# Data Encryption Package',
+                '# Data Encryption Package - ENCRYPTS DATA IN-PLACE',
                 'ENCRYPTION_CIPHER=AES-256-CBC',
                 'ENCRYPTION_KEY=' . (env('APP_KEY') ?: 'base64:' . base64_encode(random_bytes(32))),
                 'HASH_ALGORITHM=sha256',
@@ -111,21 +118,36 @@ class InstallEncryptionCommand extends Command
     protected function showNextSteps()
     {
         $this->newLine();
-        $this->info('📝 Next Steps:');
-        $this->line('1. Run migrations: php artisan migrate');
-        $this->line('2. Add the HasEncryptedFields trait to your models');
-        $this->line('3. Configure fields to encrypt in config/data-encryption.php');
-        $this->line('4. Encrypt existing data: php artisan data-encryption:encrypt');
-        $this->line('5. Start Meilisearch service for searching encrypted data');
+        $this->info('⚠️  ⚠️  ⚠️  IMPORTANT WARNING ⚠️  ⚠️  ⚠️');
+        $this->line('This package ENCRYPTS DATA IN-PLACE in your existing columns.');
+        $this->line('Your original email/phone columns will contain ENCRYPTED data.');
+        $this->line('Without the encryption key, data is UNRECOVERABLE.');
         $this->newLine();
-        $this->line('Example model setup:');
-        $this->line('use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
+        
+        $this->info('📝 Next Steps (CRITICAL):');
+        $this->line('1. ✅ BACKUP YOUR DATABASE (if not already done)');
+        $this->line('2. Run migrations: php artisan migrate');
+        $this->line('   - Adds hash columns for searching');
+        $this->line('   - Adds optional backup columns');
         $this->line('');
-        $this->line('class User extends Model {');
-        $this->line('    use HasEncryptedFields;');
-        $this->line('    ');
-        $this->line('    protected static $encryptedFields = [\'email\', \'phone\'];');
-        $this->line('    protected static $searchableHashFields = [\'email\', \'phone\'];');
-        $this->line('}');
+        $this->line('3. Add HasEncryptedFields trait to models:');
+        $this->line('   use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
+        $this->line('   protected static $encryptedFields = [\'email\', \'phone\'];');
+        $this->line('   protected static $searchableHashFields = [\'email\', \'phone\'];');
+        $this->line('');
+        $this->line('4. Encrypt existing data (DESTRUCTIVE OPERATION):');
+        $this->line('   php artisan data-encryption:encrypt "App\Models\User" --backup');
+        $this->line('');
+        $this->line('5. Test encryption is working:');
+        $this->line('   php artisan tinker');
+        $this->line('   >>> $user = User::first();');
+        $this->line('   >>> $user->email  # Should show decrypted email');
+        $this->line('');
+        $this->line('6. After verification, remove backup columns:');
+        $this->line('   php artisan make:migration remove_backup_columns --table=users');
+        $this->line('   Then: php artisan migrate');
+        $this->newLine();
+        
+        $this->error('🚨 WITHOUT PROPER BACKUP, DATA LOSS IS PERMANENT!');
     }
 }
