@@ -10,217 +10,165 @@ use PalakRajput\DataEncryption\Services\HashService;
 
 class EncryptDataCommand extends Command
 {
-    protected $signature = 'data-encryption:encrypt 
+    protected $signature = 'data-encryption:encrypt
                             {model : Model class name}
                             {--fields= : Fields to encrypt (comma-separated)}
                             {--chunk=1000 : Number of records per chunk}
                             {--dry-run : Show what would be encrypted without doing it}
                             {--backup : Backup original data to *_backup columns}
                             {--force : Skip confirmation prompts}';
-    
-    protected $description = 'Encrypt existing data in database - ENCRYPTS ORIGINAL COLUMNS';
-    
-    public function handle()
+
+    protected $description = 'Encrypt existing data IN-PLACE in original columns';
+
+    public function handle(): int
     {
         $modelClass = $this->argument('model');
-        
+
         if (!class_exists($modelClass)) {
-            $this->error("❌ Model {$modelClass} does not exist!");
-            return 1;
+            $this->error("❌ Model {$modelClass} does not exist.");
+            return Command::FAILURE;
         }
-        
-        $fields = $this->option('fields') 
-            ? explode(',', $this->option('fields'))
+
+        $fields = $this->option('fields')
+            ? array_map('trim', explode(',', $this->option('fields')))
             : ['email', 'phone'];
-        
+
         $chunkSize = (int) $this->option('chunk');
         $dryRun = $this->option('dry-run');
         $backup = $this->option('backup');
         $force = $this->option('force');
-        
-        $this->info("🔐 ENCRYPTING DATA IN ORIGINAL COLUMNS for model: {$modelClass}");
-        $this->warn("⚠️  WARNING: This will overwrite {$modelClass}::" . implode(', ', $fields) . " columns!");
-        $this->info("Fields: " . implode(', ', $fields));
-        $this->info("Chunk size: {$chunkSize}");
-        
-        if ($dryRun) {
-            $this->warn('📊 DRY RUN - No changes will be made');
-        }
-        
+
         $model = new $modelClass;
         $table = $model->getTable();
-        
-        // Verify hash columns exist
+
+        $this->info("🔐 Encrypting data for model: {$modelClass}");
+        $this->warn("⚠️  This ENCRYPTS ORIGINAL columns: " . implode(', ', $fields));
+
+        // Validate required columns
         foreach ($fields as $field) {
-            $hashColumn = $field . '_hash';
-            if (!Schema::hasColumn($table, $hashColumn)) {
-                $this->error("❌ Column {$hashColumn} does not exist! Run migrations first.");
-                $this->line("Run: php artisan migrate");
-                return 1;
+            if (!Schema::hasColumn($table, $field . '_hash')) {
+                $this->error("❌ Missing column {$field}_hash. Run migrations first.");
+                return Command::FAILURE;
             }
-            
-            if ($backup && !Schema::hasColumn($table, $field . '_backup')) {
-                $this->warn("⚠️  Column {$field}_backup does not exist for backup!");
-                $this->line("Re-run migration with --backup option or skip --backup flag");
+
+            if ($backup && !Schema::hasColumn($table, "{$field}_backup")) {
+                $this->warn("⚠️  Backup column {$field}_backup missing. Backup disabled.");
                 $backup = false;
             }
         }
-        
-        $encryptionService = app(EncryptionService::class);
-        $hashService = app(HashService::class);
-        
+
         $total = DB::table($table)->count();
-        $this->info("Total records to process: {$total}");
-        
-        // Safety confirmation (unless --force or --dry-run)
+
+        if ($total === 0) {
+            $this->warn('⚠️  No records found. Nothing to encrypt.');
+            return Command::SUCCESS;
+        }
+
         if (!$dryRun && !$force) {
             $this->newLine();
-            $this->error("🚨 🚨 🚨  DANGER ZONE  🚨 🚨 🚨");
-            $this->line("This operation:");
-            $this->line("• Overwrites original {$modelClass}::" . implode(', ', $fields) . " columns");
-            $this->line("• Converts plain text to ENCRYPTED data");
-            $this->line("• Without encryption key, data is UNRECOVERABLE");
-            $this->newLine();
-            
-            if (!$this->confirm("✅ Have you backed up your database?", false)) {
-                $this->error("❌ Operation cancelled. Backup your database first.");
-                $this->line("Run: mysqldump -u root -p database_name > backup.sql");
-                return 1;
-            }
-            
-            if (!$this->confirm("⚠️  Are you sure you want to encrypt {$total} records?", false)) {
-                $this->error("❌ Operation cancelled.");
-                return 1;
-            }
-            
-            // Final warning for large datasets
-            if ($total > 1000) {
-                $this->warn("⚠️  Large dataset detected: {$total} records");
-                if (!$this->confirm("🔴 FINAL WARNING: Proceed with encryption?", false)) {
-                    $this->error("❌ Operation cancelled.");
-                    return 1;
-                }
+            $this->error('🚨 DANGER ZONE');
+            $this->line('• This overwrites original data');
+            $this->line('• Without ENCRYPTION_KEY data is unrecoverable');
+
+            if (!$this->confirm('Have you backed up your database?', false)) {
+                $this->error('❌ Operation cancelled.');
+                return Command::FAILURE;
             }
         }
-        
+
+        $encryptionService = app(EncryptionService::class);
+        $hashService = app(HashService::class);
+
+        $encrypted = 0;
+        $skipped = 0;
+        $errors = 0;
+
         $bar = $this->output->createProgressBar($total);
-        $encryptedCount = 0;
-        $skippedCount = 0;
-        $errorCount = 0;
-        
-        DB::table($table)->orderBy('id')->chunk($chunkSize, function ($records) use (
-            $table, $fields, $encryptionService, $hashService, $bar, $dryRun, $backup, &$encryptedCount, &$skippedCount, &$errorCount
-        ) {
-            foreach ($records as $record) {
-                $updates = [];
-                $shouldUpdate = false;
-                
-                foreach ($fields as $field) {
-                    if (isset($record->$field) && !empty($record->$field)) {
-                        // Check if already encrypted
-                        if ($this->isAlreadyEncrypted($record->$field)) {
-                            $skippedCount++;
+
+        DB::table($table)
+            ->orderBy('id')
+            ->chunk($chunkSize, function ($records) use (
+                $table,
+                $fields,
+                $encryptionService,
+                $hashService,
+                $dryRun,
+                $backup,
+                &$encrypted,
+                &$skipped,
+                &$errors,
+                $bar
+            ) {
+                foreach ($records as $record) {
+                    $updates = [];
+                    $skipRecord = false;
+
+                    foreach ($fields as $field) {
+                        if (empty($record->$field)) {
                             continue;
                         }
-                        
-                        // Backup original if requested
-                        if ($backup) {
-                            $backupField = $field . '_backup';
-                            $updates[$backupField] = $record->$field;
+
+                        if ($this->isAlreadyEncrypted($record->$field)) {
+                            $skipped++;
+                            $skipRecord = true;
+                            break;
                         }
-                        
-                        // Encrypt the value INTO THE ORIGINAL COLUMN
+
                         try {
+                            if ($backup) {
+                                $updates["{$field}_backup"] = $record->$field;
+                            }
+
                             $updates[$field] = $encryptionService->encrypt($record->$field);
-                            
-                            // Create hash for searching
-                            $updates[$field . '_hash'] = $hashService->hash($record->$field);
-                            
-                            $shouldUpdate = true;
-                            $encryptedCount++;
-                        } catch (\Exception $e) {
-                            $this->warn("Failed to encrypt {$field} for record {$record->id}: " . $e->getMessage());
-                            $errorCount++;
+                            $updates["{$field}_hash"] = $hashService->hash($record->$field);
+
+                        } catch (\Throwable $e) {
+                            $errors++;
+                            $skipRecord = true;
+                            break;
                         }
                     }
-                }
-                
-                if ($shouldUpdate && !$dryRun) {
-                    DB::table($table)
-                        ->where('id', $record->id)
-                        ->update($updates);
-                }
-                
-                $bar->advance();
-            }
-        });
-        
-        $bar->finish();
-        $this->newLine();
-        
-        if ($dryRun) {
-            $this->info("📊 Dry run results:");
-            $this->line("   Would encrypt: {$encryptedCount} records");
-            $this->line("   Already encrypted: {$skippedCount} records");
-            $this->line("   Would error: {$errorCount} records");
-            $this->line("   Total records: {$total}");
-            $this->info('✅ Dry run completed. No changes made.');
-            
-            if ($encryptedCount > 0) {
-                $this->line('');
-                $this->info('To actually encrypt, run without --dry-run flag:');
-                $this->line("php artisan data-encryption:encrypt \"{$modelClass}\" --backup");
-            }
-        } else {
-            $this->info("📊 Encryption completed:");
-            $this->line("   ✅ Encrypted: {$encryptedCount} records");
-            $this->line("   ⏭️  Already encrypted: {$skippedCount} records");
-            $this->line("   ❌ Errors: {$errorCount} records");
-            $this->line("   📊 Total processed: {$total}");
-            
-            if ($encryptedCount > 0) {
-                $this->info('🎉 Data encryption successful!');
-                
-                if ($backup) {
-                    $this->info('💾 Original data backed up in *_backup columns');
-                    $this->line('To remove backup columns after verification:');
-                    foreach ($fields as $field) {
-                        $this->line("   php artisan make:migration drop_{$field}_backup_from_{$table}_table");
+
+                    if (!$skipRecord && !$dryRun && !empty($updates)) {
+                        DB::table($table)->where('id', $record->id)->update($updates);
+                        $encrypted++;
                     }
+
+                    $bar->advance();
                 }
-                
-                // Test that encryption works
-                $this->line('');
-                $this->info('🧪 Test encryption:');
-                $this->line("   php artisan tinker");
-                $this->line("   >>> \$user = {$modelClass}::first();");
-                $this->line("   >>> echo \$user->email; // Should show decrypted email");
-                $this->line("   >>> echo \$user->email_hash; // Should show hash");
-            } else {
-                $this->warn('⚠️  No records were encrypted (may already be encrypted)');
-            }
-            
-            $this->warn('⚠️  REMEMBER: Your original columns now contain ENCRYPTED data!');
-            $this->line('   Keep your ENCRYPTION_KEY safe in .env file');
+            });
+
+        $bar->finish();
+        $this->newLine(2);
+
+        $this->info('📊 Encryption summary');
+        $this->line("   ✅ Encrypted: {$encrypted}");
+        $this->line("   ⏭️  Skipped: {$skipped}");
+        $this->line("   ❌ Errors: {$errors}");
+        $this->line("   📦 Total: {$total}");
+
+        if ($backup && $encrypted > 0) {
+            $this->info('💾 Backup columns populated (*_backup)');
         }
+
+        $this->warn('⚠️ Original columns now contain encrypted data.');
+        $this->line('Keep your ENCRYPTION_KEY safe.');
+
+        return Command::SUCCESS;
     }
-    
+
     protected function isAlreadyEncrypted($value): bool
     {
         if (!is_string($value)) {
             return false;
         }
-        
-        try {
-            $decoded = base64_decode($value, true);
-            if ($decoded === false) {
-                return false;
-            }
-            
-            $data = json_decode($decoded, true);
-            return isset($data['iv'], $data['value'], $data['mac']);
-        } catch (\Exception $e) {
+
+        $decoded = base64_decode($value, true);
+        if ($decoded === false) {
             return false;
         }
+
+        $json = json_decode($decoded, true);
+        return is_array($json) && isset($json['iv'], $json['value'], $json['mac']);
     }
 }
