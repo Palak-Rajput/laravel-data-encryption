@@ -21,6 +21,18 @@
             "PalakRajput\\DataEncryption\\": "src/"
         }
     },
+    "scripts": {
+        "post-autoload-dump": [
+            "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
+            "@php artisan package:discover --ansi"
+        ],
+        "post-install-cmd": [
+            "PalakRajput\\DataEncryption\\ComposerScripts::postInstall"
+        ],
+        "post-update-cmd": [
+            "PalakRajput\\DataEncryption\\ComposerScripts::postUpdate"
+        ]
+    },
     "extra": {
         "laravel": {
             "providers": [
