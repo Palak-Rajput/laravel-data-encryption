@@ -70,11 +70,6 @@ class EncryptDataCommand extends Command
         $hashService = app(HashService::class);
         
         $total = DB::table($table)->count();
-        if ($total === 0) {
-    $this->warn('⚠️  No records found. Nothing to encrypt.');
-    return Command::SUCCESS;
-}
-
         $this->info("Total records to process: {$total}");
         
         // Safety confirmation (unless --force or --dry-run)
