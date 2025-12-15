@@ -22,17 +22,17 @@ class DataEncryptionServiceProvider extends ServiceProvider
             );
         });
 
-        $this->app->singleton(EncryptionService::class, function ($app) {
-            return new EncryptionService($app['config']['data-encryption']);
-        });
+        $this->app->singleton(EncryptionService::class, fn ($app) =>
+            new EncryptionService($app['config']['data-encryption'])
+        );
 
-        $this->app->singleton(MeilisearchService::class, function ($app) {
-            return new MeilisearchService($app['config']['data-encryption']);
-        });
+        $this->app->singleton(MeilisearchService::class, fn ($app) =>
+            new MeilisearchService($app['config']['data-encryption'])
+        );
 
-        $this->app->singleton(HashService::class, function ($app) {
-            return new HashService($app['config']['data-encryption']);
-        });
+        $this->app->singleton(HashService::class, fn ($app) =>
+            new HashService($app['config']['data-encryption'])
+        );
     }
 
     public function boot()
@@ -42,23 +42,14 @@ class DataEncryptionServiceProvider extends ServiceProvider
         ], 'config');
 
         $this->publishes([
-            __DIR__ . '/../../database/migrations/' => database_path('migrations'),
+            __DIR__ . '/../../database/migrations' => database_path('migrations'),
         ], 'migrations');
 
         if ($this->app->runningInConsole()) {
-
             $this->commands([
                 \PalakRajput\DataEncryption\Console\Commands\InstallEncryptionCommand::class,
                 \PalakRajput\DataEncryption\Console\Commands\EncryptDataCommand::class,
             ]);
-
-            // ✅ Show post-install instruction (safe)
-            if (! file_exists(config_path('data-encryption.php'))) {
-                $this->app['console']->output()->writeln(
-                    "\n<info>Laravel Data Encryption installed.</info>\n" .
-                    "<comment>Run:</comment> <fg=cyan>php artisan data-encryption:install</>\n"
-                );
-            }
         }
     }
 }
