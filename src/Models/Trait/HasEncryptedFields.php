@@ -177,24 +177,27 @@ trait HasEncryptedFields
     /**
      * Magic search method: tries Meilisearch first, falls back to hashed DB search.
      */
-    public static function searchEncrypted(string $query)
-    {
-        $model = new static();
-        $builder = static::query();
+   public static function searchEncrypted(string $query)
+{
+    $model = new static();
 
-        // Try Meilisearch
-        $results = $model->scopeSearchInMeilisearch($builder, $query, $model::$searchableHashFields ?? []);
-        if ($results->count() > 0) {
-            return $results;
-        }
+    // Try Meilisearch first
+    $builder = $model->newQuery();
+    $ids = $model->scopeSearchInMeilisearch($builder, $query, $model::$searchableHashFields ?? [])
+                 ->pluck($model->getKeyName())
+                 ->toArray();
 
-        // Fallback: search hashed fields in DB
-        $builder = static::query();
-        $hashFields = $model::$searchableHashFields ?? [];
-        foreach ($hashFields as $field) {
-            $builder->orWhere($field . '_hash', app(HashService::class)->hash($query));
-        }
-
-        return $builder;
+    if (!empty($ids)) {
+        return static::whereIn($model->getKeyName(), $ids)->get();
     }
+
+    // Fallback: search hashed fields in DB
+    $builder = $model->newQuery();
+    foreach ($model::$searchableHashFields ?? [] as $field) {
+        $builder->orWhere($field . '_hash', app(HashService::class)->hash($query));
+    }
+
+    return $builder->get();
+}
+
 }
