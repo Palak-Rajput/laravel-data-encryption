@@ -98,27 +98,37 @@ public static function searchEncrypted(string $query)
 {
     $model = new static();
 
-    // 1️⃣ Try Meilisearch for PARTIAL search
+    // 1️⃣ Try Meilisearch for PARTIAL search (if enabled)
     if (config('data-encryption.meilisearch.enabled', false)) {
-        $ids = app(MeilisearchService::class)->search(
-            $model->getMeilisearchIndexName(),
-            $query,
-            array_map(fn ($f) => $f . '_hash', static::$searchableHashFields ?? [])
-        );
+        // Get searchable fields
+        $searchableFields = static::$searchableHashFields ?? [];
+        
+        if (!empty($searchableFields)) {
+            // Search in Meilisearch
+            $results = app(MeilisearchService::class)->search(
+                $model->getMeilisearchIndexName(),
+                $query,
+                $searchableFields  // Pass actual field names, not hash fields
+            );
 
-        if (!empty($ids)) {
-            return static::whereIn($model->getKeyName(), collect($ids)->pluck('id'));
+            if (!empty($results)) {
+                $ids = collect($results)->pluck('id')->toArray();
+                return static::whereIn($model->getKeyName(), $ids);
+            }
         }
     }
 
-    // 2️⃣ Fallback to EXACT hash search
-    $hashService = app(HashService::class);
-
-    return static::where(function ($q) use ($query, $hashService, $model) {
+    // 2️⃣ Fallback: Try partial matching on decrypted data
+    // This is less efficient but works without Meilisearch
+    return static::where(function ($q) use ($query) {
         foreach (static::$searchableHashFields ?? [] as $field) {
-            $q->orWhere(
-                $field . '_hash',
-                $hashService->hash($query)
+            $q->orWhereRaw(
+                'CONVERT(AES_DECRYPT(FROM_BASE64(SUBSTRING_INDEX(?, \'.\', -2)), ?) USING utf8mb4) LIKE ?',
+                [
+                    $field,
+                    config('data-encryption.key'), // Your encryption key
+                    '%' . $query . '%'
+                ]
             );
         }
     });
