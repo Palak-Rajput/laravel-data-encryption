@@ -94,30 +94,36 @@ trait HasEncryptedFields
         $ids = collect($results)->pluck('id')->toArray();
         return $query->whereIn($this->getQualifiedKeyName(), $ids);
     }
+public static function searchEncrypted(string $query)
+{
+    $model = new static();
 
-    public static function searchEncrypted(string $query)
-    {
-        $model = new static();
-
-        // Meilisearch first (optional)
-        $builder = $model->newQuery();
-        $ids = $model->scopeSearchInMeilisearch(
-            $builder,
+    // 1️⃣ Try Meilisearch for PARTIAL search
+    if (config('data-encryption.meilisearch.enabled', false)) {
+        $ids = app(MeilisearchService::class)->search(
+            $model->getMeilisearchIndexName(),
             $query,
-            array_map(fn($f) => $f.'_hash', $model::$searchableHashFields ?? [])
-        )->pluck($model->getKeyName())->toArray();
+            array_map(fn ($f) => $f . '_hash', static::$searchableHashFields ?? [])
+        );
 
-        if (!empty($ids)) return static::whereIn($model->getKeyName(), $ids);
-
-        // Fallback to DB hash search
-        $builder = $model->newQuery();
-        $hashService = app(HashService::class);
-        foreach ($model::$searchableHashFields ?? [] as $field) {
-            $builder->orWhere($field.'_hash', $hashService->hash($query));
+        if (!empty($ids)) {
+            return static::whereIn($model->getKeyName(), collect($ids)->pluck('id'));
         }
-
-        return $builder;
     }
+
+    // 2️⃣ Fallback to EXACT hash search
+    $hashService = app(HashService::class);
+
+    return static::where(function ($q) use ($query, $hashService, $model) {
+        foreach (static::$searchableHashFields ?? [] as $field) {
+            $q->orWhere(
+                $field . '_hash',
+                $hashService->hash($query)
+            );
+        }
+    });
+}
+
     public function getMeilisearchIndexName(): string
 {
     $prefix = config('data-encryption.meilisearch.index_prefix', 'encrypted_');
