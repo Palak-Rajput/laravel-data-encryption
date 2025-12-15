@@ -9,8 +9,9 @@ use PalakRajput\DataEncryption\Services\MeilisearchService;
 
 trait HasEncryptedFields
 {
-    protected static $encryptedFields = [];
-    protected static $searchableHashFields = [];
+    // REMOVE THESE - Let models define their own properties
+    // protected static $encryptedFields = [];
+    // protected static $searchableHashFields = [];
     
     protected static function bootHasEncryptedFields()
     {
@@ -35,41 +36,68 @@ trait HasEncryptedFields
         });
     }
     
-    // In src/Models/Trait/HasEncryptedFields.php
-public function encryptFields()
-{
-    $encryptionService = app(EncryptionService::class);
-    $hashService = app(HashService::class);
-    
-    foreach (static::$encryptedFields as $field) {
-        if (isset($this->attributes[$field]) && !empty($this->attributes[$field])) {
-            // Skip if already encrypted
-            if ($this->isEncrypted($this->attributes[$field])) {
-                continue;
-            }
-            
-            // Encrypt INTO THE ORIGINAL COLUMN
-            $this->attributes[$field] = $encryptionService->encrypt($this->attributes[$field]);
-            
-            // Create hash for searching
-            $hashField = $field . '_hash';
-            if (in_array($field, static::$searchableHashFields)) {
-                $this->attributes[$hashField] = $hashService->hash(
-                    $this->getOriginal($field) ?? $this->attributes[$field]
-                );
+    public function encryptFields()
+    {
+        $encryptionService = app(EncryptionService::class);
+        $hashService = app(HashService::class);
+        
+        // Use null coalescing in case model doesn't define properties
+        $encryptedFields = static::$encryptedFields ?? [];
+        $searchableHashFields = static::$searchableHashFields ?? [];
+        
+        foreach ($encryptedFields as $field) {
+            if (isset($this->attributes[$field]) && !empty($this->attributes[$field])) {
+                // Skip if already encrypted
+                if ($this->isEncrypted($this->attributes[$field])) {
+                    continue;
+                }
+                
+                // Encrypt INTO THE ORIGINAL COLUMN
+                $this->attributes[$field] = $encryptionService->encrypt($this->attributes[$field]);
+                
+                // Create hash for searching
+                $hashField = $field . '_hash';
+                if (in_array($field, $searchableHashFields)) {
+                    $this->attributes[$hashField] = $hashService->hash(
+                        $this->getOriginal($field) ?? $this->attributes[$field]
+                    );
+                }
             }
         }
     }
-}
     
     public function decryptFields()
     {
         $encryptionService = app(EncryptionService::class);
         
-        foreach (static::$encryptedFields as $field) {
-            if (isset($this->attributes[$field]) && !empty($this->attributes[$field])) {
+        $encryptedFields = static::$encryptedFields ?? [];
+        
+        foreach ($encryptedFields as $field) {
+            if (isset($this->attributes[$field]) && 
+                !empty($this->attributes[$field]) &&
+                $this->isEncrypted($this->attributes[$field])) {
+                
                 $this->attributes[$field] = $encryptionService->decrypt($this->attributes[$field]);
             }
+        }
+    }
+    
+    protected function isEncrypted($value): bool
+    {
+        if (!is_string($value)) {
+            return false;
+        }
+        
+        try {
+            $decoded = base64_decode($value, true);
+            if ($decoded === false) {
+                return false;
+            }
+            
+            $data = json_decode($decoded, true);
+            return isset($data['iv'], $data['value'], $data['mac']);
+        } catch (\Exception $e) {
+            return false;
         }
     }
     
@@ -78,8 +106,10 @@ public function encryptFields()
         $meilisearch = app(MeilisearchService::class);
         $hashService = app(HashService::class);
         
+        $searchableHashFields = static::$searchableHashFields ?? [];
         $data = [];
-        foreach (static::$searchableHashFields as $field) {
+        
+        foreach ($searchableHashFields as $field) {
             $hashField = $field . '_hash';
             if (isset($this->$hashField)) {
                 $data[$hashField] = $this->$hashField;

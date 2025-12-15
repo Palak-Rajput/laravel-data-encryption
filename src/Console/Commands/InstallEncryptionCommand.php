@@ -22,7 +22,7 @@ class InstallEncryptionCommand extends Command
     public function handle()
     {
         $this->info('🔐 Installing Laravel Data Encryption Package...');
-        $this->warn('⚠️  This package will ENCRYPT DATA IN-PLACE in your existing columns!');
+        $this->warn('⚠️  This package will ENCRYPTS DATA IN-PLACE in your existing columns!');
         
         $auto = $this->option('auto');
         $skipConfirm = $this->option('yes');
@@ -75,41 +75,37 @@ class InstallEncryptionCommand extends Command
         }
     }
     
-    protected function autoSetupModels($skipConfirm = false)
-    {
-        $this->info('🤖 Auto-configuring models...');
+  // In InstallEncryptionCommand.php autoSetupModels() method:
+protected function autoSetupModels($skipConfirm = false)
+{
+    $this->info('🤖 Auto-configuring models...');
+    
+    // Check for User model (most common)
+    if (class_exists('App\Models\User')) {
+        $this->setupUserModel();
         
-        // Check for User model (most common)
-        if (class_exists('App\Models\User')) {
-            $this->setupUserModel();
+        // Auto-encrypt if --auto flag
+        if ($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true))) {
+            $this->info('🔐 Encrypting User data...');
             
-            // Auto-encrypt if --auto flag
-            if ($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true))) {
-                $this->info('🔐 Encrypting User data...');
-                
-                $backup = $this->option('backup') ? true : false;
-                
-                $this->call('data-encryption:encrypt', [
-                    'model' => 'App\Models\User',
-                    '--backup' => $backup,
-                    '--chunk' => 1000,
-                ]);
-                
-                $this->info('✅ User data encrypted successfully!');
-            }
-        } else {
-            $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
+            $backup = $this->option('backup') ? true : false;
+            
+            // Use --force when --auto is used
+            $force = $this->option('auto') ? '--force' : '';
+            
+            $this->call('data-encryption:encrypt', [
+                'model' => 'App\Models\User',
+                '--backup' => $backup,
+                '--chunk' => 1000,
+                '--force' => $this->option('auto'), // Add this
+            ]);
+            
+            $this->info('✅ User data encrypted successfully!');
         }
-        
-        // Check for other common models
-        $commonModels = ['Customer', 'Client', 'Member', 'Patient', 'Contact'];
-        foreach ($commonModels as $model) {
-            $fullClass = "App\Models\\{$model}";
-            if (class_exists($fullClass)) {
-                $this->info("Found {$model} model - add HasEncryptedFields trait if needed");
-            }
-        }
+    } else {
+        $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
     }
+}
     
     protected function setupUserModel()
     {
@@ -123,52 +119,104 @@ class InstallEncryptionCommand extends Command
         $content = File::get($userModelPath);
         
         // Check if trait already added
-        if (str_contains($content, 'use HasEncryptedFields;')) {
-            $this->info('✅ User model already has HasEncryptedFields trait');
+        if (str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields')) {
+            $this->info('✅ User model already imports HasEncryptedFields trait');
+            
+            // Check if properties exist
+            if (!str_contains($content, 'protected static $encryptedFields')) {
+                $this->addPropertiesToUserModel($content, $userModelPath);
+                $this->info('✅ Added encrypted fields properties to User model');
+            } else {
+                $this->info('✅ User model already has encrypted fields properties');
+            }
             return;
         }
         
         // Add the trait use statement after namespace
         $traitUse = "use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;";
         
-        if (!str_contains($content, 'PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields')) {
-            // Add after namespace
-            $content = preg_replace(
-                '/^(namespace App\\\\Models;)/m',
-                "$1\n\n{$traitUse}",
-                $content
-            );
-        }
+        // Add after namespace
+        $content = preg_replace(
+            '/^(namespace App\\\\Models;)/m',
+            "$1\n\n{$traitUse}",
+            $content
+        );
         
-        // Add trait in class after opening brace
-        if (!str_contains($content, 'use HasEncryptedFields;')) {
+        // Add trait to the use statement in class
+        // Find existing traits line (like: use HasApiTokens, HasFactory, Notifiable;)
+        if (preg_match('/(use (?:[A-Za-z\\\\_,\s]+);)/', $content, $matches)) {
+            // Add HasEncryptedFields to existing traits
+            $newTraits = rtrim($matches[1], ';') . ', HasEncryptedFields;';
+            $content = str_replace($matches[1], $newTraits, $content);
+        } else {
+            // Add new traits line after class opening
             $content = preg_replace(
-                '/(class User(?:.*?)\s*\{)/',
+                '/(class User extends \w+\s*\{)/',
                 "$1\n    use HasEncryptedFields;",
                 $content
             );
         }
         
         // Add encrypted fields properties
-        if (!str_contains($content, 'protected static $encryptedFields')) {
-            // Find where to insert (after the trait line)
-            $lines = explode("\n", $content);
-            $newContent = [];
-            
-            foreach ($lines as $line) {
-                $newContent[] = $line;
-                if (str_contains($line, 'use HasEncryptedFields;')) {
-                    $newContent[] = '';
-                    $newContent[] = '    protected static $encryptedFields = [\'email\', \'phone\'];';
-                    $newContent[] = '    protected static $searchableHashFields = [\'email\', \'phone\'];';
-                }
-            }
-            
-            $content = implode("\n", $newContent);
+        $this->addPropertiesToUserModel($content, $userModelPath);
+        
+        $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
+    }
+    
+    protected function addPropertiesToUserModel(&$content, $filePath)
+    {
+        // Check if properties already exist
+        if (str_contains($content, 'protected static $encryptedFields') && 
+            str_contains($content, 'protected static $searchableHashFields')) {
+            return;
         }
         
-        File::put($userModelPath, $content);
-        $this->info('✅ Updated User model with HasEncryptedFields trait');
+        // Find where to add properties (after the class opening or traits)
+        $lines = explode("\n", $content);
+        $newLines = [];
+        $added = false;
+        
+        foreach ($lines as $line) {
+            $newLines[] = $line;
+            
+            // Add properties after class opening brace or after traits
+            if (!$added && (
+                trim($line) === '{' || 
+                str_contains($line, 'use HasApiTokens') ||
+                str_contains($line, 'use HasEncryptedFields')
+            )) {
+                // Skip if next line is already a property
+                $nextLine = next($lines) ?: '';
+                if (!str_contains($nextLine, 'protected static $')) {
+                    $newLines[] = '';
+                    $newLines[] = '    protected static $encryptedFields = [\'email\', \'phone\'];';
+                    $newLines[] = '    protected static $searchableHashFields = [\'email\', \'phone\'];';
+                    $added = true;
+                }
+                continue;
+            }
+        }
+        
+        // If we still haven't added properties, add before fillable
+        if (!$added) {
+            $newContent = [];
+            foreach ($lines as $line) {
+                $newContent[] = $line;
+                if (str_contains($line, 'protected $fillable')) {
+                    array_splice($newContent, -1, 0, [
+                        '',
+                        '    protected static $encryptedFields = [\'email\', \'phone\'];',
+                        '    protected static $searchableHashFields = [\'email\', \'phone\'];',
+                    ]);
+                    $added = true;
+                }
+            }
+            $content = implode("\n", $newContent);
+        } else {
+            $content = implode("\n", $newLines);
+        }
+        
+        File::put($filePath, $content);
     }
     
     protected function addEnvironmentVariables()
