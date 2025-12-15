@@ -107,117 +107,64 @@ protected function autoSetupModels($skipConfirm = false)
     }
 }
     
-    protected function setupUserModel()
-    {
-        $userModelPath = app_path('Models/User.php');
-        
-        if (!File::exists($userModelPath)) {
-            $this->warn('⚠️  User model not found at: ' . $userModelPath);
-            return;
-        }
-        
-        $content = File::get($userModelPath);
-        
-        // Check if trait already added
-        if (str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields')) {
-            $this->info('✅ User model already imports HasEncryptedFields trait');
-            
-            // Check if properties exist
-            if (!str_contains($content, 'protected static $encryptedFields')) {
-                $this->addPropertiesToUserModel($content, $userModelPath);
-                $this->info('✅ Added encrypted fields properties to User model');
-            } else {
-                $this->info('✅ User model already has encrypted fields properties');
-            }
-            return;
-        }
-        
-        // Add the trait use statement after namespace
-        $traitUse = "use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;";
-        
-        // Add after namespace
+   protected function setupUserModel()
+{
+    $userModelPath = app_path('Models/User.php');
+
+    if (!File::exists($userModelPath)) {
+        $this->warn('⚠️  User model not found at: ' . $userModelPath);
+        return;
+    }
+
+    $content = File::get($userModelPath);
+
+    // Ensure the namespace import exists for trait
+    if (!str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;')) {
         $content = preg_replace(
             '/^(namespace App\\\\Models;)/m',
-            "$1\n\n{$traitUse}",
+            "$1\n\nuse PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;",
             $content
         );
-        
-        // Add trait to the use statement in class
-        // Find existing traits line (like: use HasApiTokens, HasFactory, Notifiable;)
-        if (preg_match('/(use (?:[A-Za-z\\\\_,\s]+);)/', $content, $matches)) {
-            // Add HasEncryptedFields to existing traits
-            $newTraits = rtrim($matches[1], ';') . ', HasEncryptedFields;';
-            $content = str_replace($matches[1], $newTraits, $content);
-        } else {
-            // Add new traits line after class opening
-            $content = preg_replace(
-                '/(class User extends \w+\s*\{)/',
-                "$1\n    use HasEncryptedFields;",
-                $content
-            );
-        }
-        
-        // Add encrypted fields properties
-        $this->addPropertiesToUserModel($content, $userModelPath);
-        
-        $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
     }
-    
-    protected function addPropertiesToUserModel(&$content, $filePath)
-    {
-        // Check if properties already exist
-        if (str_contains($content, 'protected static $encryptedFields') && 
-            str_contains($content, 'protected static $searchableHashFields')) {
-            return;
-        }
-        
-        // Find where to add properties (after the class opening or traits)
-        $lines = explode("\n", $content);
-        $newLines = [];
-        $added = false;
-        
-        foreach ($lines as $line) {
-            $newLines[] = $line;
-            
-            // Add properties after class opening brace or after traits
-            if (!$added && (
-                trim($line) === '{' || 
-                str_contains($line, 'use HasApiTokens') ||
-                str_contains($line, 'use HasEncryptedFields')
-            )) {
-                // Skip if next line is already a property
-                $nextLine = next($lines) ?: '';
-                if (!str_contains($nextLine, 'protected static $')) {
-                    $newLines[] = '';
-                    $newLines[] = '    protected static $encryptedFields = [\'email\', \'phone\'];';
-                    $newLines[] = '    protected static $searchableHashFields = [\'email\', \'phone\'];';
-                    $added = true;
-                }
-                continue;
-            }
-        }
-        
-        // If we still haven't added properties, add before fillable
-        if (!$added) {
-            $newContent = [];
-            foreach ($lines as $line) {
-                $newContent[] = $line;
-                if (str_contains($line, 'protected $fillable')) {
-                    array_splice($newContent, -1, 0, [
-                        '',
-                        '    protected static $encryptedFields = [\'email\', \'phone\'];',
-                        '    protected static $searchableHashFields = [\'email\', \'phone\'];',
-                    ]);
-                    $added = true;
-                }
-            }
-            $content = implode("\n", $newContent);
-        } else {
-            $content = implode("\n", $newLines);
-        }
-        
-        File::put($filePath, $content);
+
+    // Add trait inside class if not present
+    if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
+        // Find class opening
+        $content = preg_replace(
+            '/(class User extends [^{]+\{)/',
+            "$1\n    use HasEncryptedFields;",
+            $content
+        );
     }
+
+    // Add encrypted fields properties
+    $this->addPropertiesToUserModel($content, $userModelPath);
+
+    File::put($userModelPath, $content);
+    $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
+}
+
+protected function addPropertiesToUserModel(&$content, $filePath)
+{
+    // Only add if properties are missing
+    if (str_contains($content, 'protected static $encryptedFields') &&
+        str_contains($content, 'protected static $searchableHashFields')) {
+        return;
+    }
+
+    // Insert properties right after "use ...;" inside class
+    $content = preg_replace_callback(
+        '/(use [^;]+;)/',
+        function ($matches) {
+            return $matches[1] . "\n\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
+        },
+        $content,
+        1 // only first match
+    );
+
+    File::put($filePath, $content);
+}
+
     
     protected function addEnvironmentVariables()
     {
