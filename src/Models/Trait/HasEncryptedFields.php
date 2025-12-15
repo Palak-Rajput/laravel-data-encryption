@@ -118,4 +118,15 @@ trait HasEncryptedFields
 
         return $builder;
     }
+    public function getMeilisearchIndexName(): string
+{
+    $prefix = config('data-encryption.meilisearch.index_prefix', 'encrypted_');
+
+    return $prefix . str_replace(
+        '\\',
+        '_',
+        strtolower(get_class($this))
+    );
+}
+
 }
