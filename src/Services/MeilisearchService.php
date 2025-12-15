@@ -7,95 +7,74 @@ use Meilisearch\Exceptions\ApiException;
 
 class MeilisearchService
 {
-    protected $client;
-    protected $config;
-    
-    public function __construct(array $config)
+    protected Client $client;
+    protected array $config;
+
+    public function __construct()
     {
-        $this->config = $config['meilisearch'];
+        $this->config = config('data-encryption.meilisearch');
+
         $this->client = new Client(
             $this->config['host'],
             $this->config['key']
         );
     }
-    
-    public function createIndex(string $indexName, array $fields = [])
+
+    public function createIndex(string $indexName, array $searchableFields = [])
     {
         try {
             $index = $this->client->index($indexName);
-            
-            // Configure searchable attributes
-            if (!empty($fields)) {
-                $index->updateSearchableAttributes($fields);
+
+            if (!empty($searchableFields)) {
+                $index->updateSearchableAttributes($searchableFields);
             }
-            
-            // Configure filterable attributes
-            $index->updateFilterableAttributes($fields);
-            
-            // Configure sortable attributes
-            $index->updateSortableAttributes($fields);
-            
+
+            $index->updateTypoTolerance(['enabled' => true]);
+            $index->updatePrefixSearch('all');
+
             return $index;
         } catch (ApiException $e) {
-            if (config('app.debug')) {
-                throw $e;
-            }
+            if (config('app.debug')) throw $e;
             return null;
         }
     }
-    
+
     public function indexDocument(string $indexName, array $document)
     {
         try {
-            $index = $this->client->index($indexName);
-            $index->addDocuments([$document]);
+            $this->client
+                ->index($indexName)
+                ->addDocuments([$document]);
         } catch (ApiException $e) {
-            if (config('app.debug')) {
-                throw $e;
-            }
+            if (config('app.debug')) throw $e;
         }
     }
-    
-    public function search(string $indexName, string $query, array $fields = [])
+
+    public function search(string $indexName, string $query, array $fields = []): array
     {
         try {
-            $index = $this->client->index($indexName);
-            
-            $searchParams = [];
+            $params = [];
+
             if (!empty($fields)) {
-                $searchParams['attributesToSearchOn'] = $fields;
+                $params['attributesToSearchOn'] = $fields;
             }
-            
-            $results = $index->search($query, $searchParams);
-            
-            return $results->getHits();
+
+            return $this->client
+                ->index($indexName)
+                ->search($query, $params)
+                ->getHits();
         } catch (ApiException $e) {
-            if (config('app.debug')) {
-                throw $e;
-            }
+            if (config('app.debug')) throw $e;
             return [];
         }
     }
-    
-    public function deleteDocument(string $indexName, $documentId)
+
+    public function deleteDocument(string $indexName, $id): void
     {
         try {
-            $index = $this->client->index($indexName);
-            $index->deleteDocument($documentId);
+            $this->client->index($indexName)->deleteDocument($id);
         } catch (ApiException $e) {
-            if (config('app.debug')) {
-                throw $e;
-            }
-        }
-    }
-    
-    public function getIndexStats(string $indexName)
-    {
-        try {
-            $index = $this->client->index($indexName);
-            return $index->stats();
-        } catch (ApiException $e) {
-            return [];
+            if (config('app.debug')) throw $e;
         }
     }
 }
