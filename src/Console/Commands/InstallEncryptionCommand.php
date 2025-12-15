@@ -79,35 +79,30 @@ class InstallEncryptionCommand extends Command
 protected function autoSetupModels($skipConfirm = false)
 {
     $this->info('🤖 Auto-configuring models...');
-    
-    // Check for User model (most common)
+
     if (class_exists('App\Models\User')) {
         $this->setupUserModel();
-        
-        // Auto-encrypt if --auto flag
+
         if ($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true))) {
             $this->info('🔐 Encrypting User data...');
-            
             $backup = $this->option('backup') ? true : false;
-            
-            // Use --force when --auto is used
-            $force = $this->option('auto') ? '--force' : '';
-            
+
             $this->call('data-encryption:encrypt', [
                 'model' => 'App\Models\User',
                 '--backup' => $backup,
                 '--chunk' => 1000,
-                '--force' => $this->option('auto'), // Add this
+                '--force' => $this->option('auto'),
             ]);
-            
+
             $this->info('✅ User data encrypted successfully!');
         }
     } else {
         $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
     }
 }
+
     
-   protected function setupUserModel()
+ protected function setupUserModel()
 {
     $userModelPath = app_path('Models/User.php');
 
@@ -118,7 +113,7 @@ protected function autoSetupModels($skipConfirm = false)
 
     $content = File::get($userModelPath);
 
-    // Ensure the namespace import exists for trait
+    // Add trait import if missing
     if (!str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;')) {
         $content = preg_replace(
             '/^(namespace App\\\\Models;)/m',
@@ -127,9 +122,8 @@ protected function autoSetupModels($skipConfirm = false)
         );
     }
 
-    // Add trait inside class if not present
+    // Add trait inside class if missing
     if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
-        // Find class opening
         $content = preg_replace(
             '/(class User extends [^{]+\{)/',
             "$1\n    use HasEncryptedFields;",
@@ -137,12 +131,22 @@ protected function autoSetupModels($skipConfirm = false)
         );
     }
 
-    // Add encrypted fields properties
-    $this->addPropertiesToUserModel($content, $userModelPath);
+    // Add encrypted fields properties if missing
+    if (!str_contains($content, 'protected static $encryptedFields') &&
+        !str_contains($content, 'protected static $searchableHashFields')) {
+
+        $content = preg_replace(
+            '/(class User extends [^{]+\{)/',
+            "$1\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];",
+            $content,
+            1
+        );
+    }
 
     File::put($userModelPath, $content);
     $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
 }
+
 
 protected function addPropertiesToUserModel(&$content, $filePath)
 {
