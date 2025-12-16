@@ -15,12 +15,6 @@ class DataEncryptionServiceProvider extends ServiceProvider
             __DIR__.'/../../config/data-encryption.php', 'data-encryption'
         );
         
-        $this->app->singleton('data-encryption', function ($app) {
-            return new \PalakRajput\DataEncryption\DataEncryption(
-                $app['config']['data-encryption']
-            );
-        });
-        
         $this->app->singleton(EncryptionService::class, function ($app) {
             return new EncryptionService($app['config']['data-encryption']);
         });
@@ -40,18 +34,17 @@ class DataEncryptionServiceProvider extends ServiceProvider
             __DIR__.'/../../config/data-encryption.php' => config_path('data-encryption.php'),
         ], 'config');
         
-             $this->publishes([
+        $this->publishes([
             __DIR__.'/../../database/migrations/' => database_path('migrations'),
         ], 'migrations');
 
-
-        
         if ($this->app->runningInConsole()) {
             $this->commands([
                 \PalakRajput\DataEncryption\Console\Commands\InstallEncryptionCommand::class,
                 \PalakRajput\DataEncryption\Console\Commands\EncryptDataCommand::class,
+                \PalakRajput\DataEncryption\Console\Commands\ReindexMeilisearch::class,
+                \PalakRajput\DataEncryption\Console\Commands\DebugSearchCommand::class,
             ]);
-            
         }
     }
 }

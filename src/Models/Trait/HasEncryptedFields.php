@@ -3,9 +3,9 @@
 namespace PalakRajput\DataEncryption\Models\Trait;
 
 use Illuminate\Database\Eloquent\Builder;
-use PalakRajput\DataEncryption\Services\EncryptionService;
-use PalakRajput\DataEncryption\Services\HashService;
-use PalakRajput\DataEncryption\Services\MeilisearchService;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 
 trait HasEncryptedFields
 {
@@ -32,34 +32,111 @@ trait HasEncryptedFields
         });
     }
 
+    public function indexToMeilisearch()
+    {
+        if (!config('data-encryption.meilisearch.enabled', true)) {
+            return;
+        }
+
+        try {
+            $meilisearch = new \Meilisearch\Client('http://localhost:7700');
+            $indexName = $this->getMeilisearchIndexName();
+            $document = $this->getSearchableDocument();
+            
+            $meilisearch->index($indexName)->addDocuments([$document]);
+        } catch (\Exception $e) {
+            Log::info('Meilisearch indexing failed: ' . $e->getMessage());
+        }
+    }
+
+    public function getSearchableDocument(): array
+    {
+        $document = [
+            'id' => (string) $this->getKey(),
+            'name' => $this->name ?? null,
+            'email' => $this->email ?? null,
+            'created_at' => $this->created_at ? $this->created_at->timestamp : null,
+        ];
+
+        // Add hash fields if they exist
+        if (isset($this->email_hash)) {
+            $document['email_hash'] = $this->email_hash;
+        }
+        
+        if (isset($this->phone_hash)) {
+            $document['phone_hash'] = $this->phone_hash;
+        }
+
+        // Extract email parts for search
+        if (!empty($this->email)) {
+            $document['email_parts'] = $this->extractEmailPartsForSearch($this->email);
+        }
+
+        return array_filter($document, function($value) {
+            return !is_null($value);
+        });
+    }
+
+    protected function extractEmailPartsForSearch(string $email): array
+    {
+        $email = strtolower(trim($email));
+        $parts = [];
+
+        if (empty($email)) {
+            return $parts;
+        }
+
+        // Always add the full email
+        $parts[] = $email;
+        
+        // Extract local part and domain
+        if (str_contains($email, '@')) {
+            list($localPart, $domain) = explode('@', $email, 2);
+            
+            // Add main parts
+            $parts[] = $localPart;
+            $parts[] = $domain;
+            
+            // Add domain without TLD
+            $domainParts = explode('.', $domain);
+            if (count($domainParts) > 1) {
+                $parts[] = $domainParts[0]; // "gmail", "yahoo", etc.
+            }
+        }
+        
+        return array_unique($parts);
+    }
+
     public function encryptFields()
     {
-        $encryptionService = app(EncryptionService::class);
-        $hashService = app(HashService::class);
-
         foreach (static::$encryptedFields ?? [] as $field) {
-            if (empty($this->attributes[$field])) continue;
-
-            // Encrypt
-            if (!$this->isEncrypted($this->attributes[$field])) {
-                $this->attributes[$field] = $encryptionService->encrypt($this->attributes[$field]);
-            }
-
-            // Hash for search
-            if (in_array($field, static::$searchableHashFields ?? [])) {
+            if (!empty($this->attributes[$field]) && !$this->isEncrypted($this->attributes[$field])) {
+                // Encrypt
+                $this->attributes[$field] = Crypt::encryptString($this->attributes[$field]);
+                
+                // Create hash
                 $hashField = $field . '_hash';
-                $this->attributes[$hashField] = $hashService->hash($this->getOriginal($field) ?? $this->attributes[$field]);
+                $originalValue = $this->getOriginal($field) ?? $this->attributes[$field];
+                
+                try {
+                    $decryptedValue = Crypt::decryptString($this->attributes[$field]);
+                    $this->attributes[$hashField] = hash('sha256', 'laravel-data-encryption' . $decryptedValue);
+                } catch (\Exception $e) {
+                    $this->attributes[$hashField] = hash('sha256', 'laravel-data-encryption' . $originalValue);
+                }
             }
         }
     }
 
     public function decryptFields()
     {
-        $encryptionService = app(EncryptionService::class);
-
         foreach (static::$encryptedFields ?? [] as $field) {
             if (!empty($this->attributes[$field]) && $this->isEncrypted($this->attributes[$field])) {
-                $this->attributes[$field] = $encryptionService->decrypt($this->attributes[$field]);
+                try {
+                    $this->attributes[$field] = Crypt::decryptString($this->attributes[$field]);
+                } catch (\Exception $e) {
+                    // Keep encrypted if decryption fails
+                }
             }
         }
     }
@@ -69,6 +146,7 @@ trait HasEncryptedFields
         if (!is_string($value)) return false;
         try {
             $decoded = base64_decode($value, true);
+            if ($decoded === false) return false;
             $data = json_decode($decoded, true);
             return isset($data['iv'], $data['value'], $data['mac']);
         } catch (\Exception $e) {
@@ -76,73 +154,63 @@ trait HasEncryptedFields
         }
     }
 
-    public function scopeSearchByHash(Builder $query, string $field, string $value)
+    public static function searchEncrypted(string $query)
     {
-        $hashService = app(HashService::class);
-        return $query->where($field . '_hash', $hashService->hash($value));
-    }
-
-    public function scopeSearchInMeilisearch(Builder $query, string $searchTerm, array $fields = [])
-    {
-        $meilisearch = app(MeilisearchService::class);
-        $indexName = $this->getMeilisearchIndexName();
-
-        $results = $meilisearch->search($indexName, $searchTerm, $fields);
-
-        if (empty($results)) return $query->whereRaw('1 = 0');
-
-        $ids = collect($results)->pluck('id')->toArray();
-        return $query->whereIn($this->getQualifiedKeyName(), $ids);
-    }
-public static function searchEncrypted(string $query)
-{
-    $model = new static();
-
-    // 1️⃣ Try Meilisearch for PARTIAL search (if enabled)
-    if (config('data-encryption.meilisearch.enabled', false)) {
-        // Get searchable fields
-        $searchableFields = static::$searchableHashFields ?? [];
+        $model = new static();
         
-        if (!empty($searchableFields)) {
-            // Search in Meilisearch
-            $results = app(MeilisearchService::class)->search(
-                $model->getMeilisearchIndexName(),
-                $query,
-                $searchableFields  // Pass actual field names, not hash fields
-            );
-
-            if (!empty($results)) {
-                $ids = collect($results)->pluck('id')->toArray();
-                return static::whereIn($model->getKeyName(), $ids);
+        // Try Meilisearch first
+        if (config('data-encryption.meilisearch.enabled', true)) {
+            try {
+                $meilisearch = new \Meilisearch\Client('http://localhost:7700');
+                $indexName = $model->getMeilisearchIndexName();
+                
+                $results = $meilisearch->index($indexName)->search($query, [
+                    'attributesToSearchOn' => ['email_parts', 'name']
+                ])->getHits();
+                
+                if (!empty($results)) {
+                    $ids = collect($results)->pluck('id')->toArray();
+                    return static::whereIn($model->getKeyName(), $ids);
+                }
+            } catch (\Exception $e) {
+                // Fall back to database search
+                Log::info('Meilisearch search failed, using database fallback: ' . $e->getMessage());
             }
         }
+        
+        // Database fallback
+        return static::where(function ($q) use ($query) {
+            // Hash search
+            $hashedQuery = hash('sha256', 'laravel-data-encryption' . $query);
+            
+            foreach (static::$searchableHashFields ?? [] as $field) {
+                $q->orWhere($field . '_hash', $hashedQuery);
+            }
+            
+            // Name search
+            $q->orWhere('name', 'like', "%{$query}%");
+        });
     }
 
-    // 2️⃣ Fallback: Try partial matching on decrypted data
-    // This is less efficient but works without Meilisearch
-    return static::where(function ($q) use ($query) {
-        foreach (static::$searchableHashFields ?? [] as $field) {
-            $q->orWhereRaw(
-                'CONVERT(AES_DECRYPT(FROM_BASE64(SUBSTRING_INDEX(?, \'.\', -2)), ?) USING utf8mb4) LIKE ?',
-                [
-                    $field,
-                    config('data-encryption.key'), // Your encryption key
-                    '%' . $query . '%'
-                ]
-            );
+    public function removeFromMeilisearch()
+    {
+        if (!config('data-encryption.meilisearch.enabled', true)) {
+            return;
         }
-    });
-}
+
+        try {
+            $meilisearch = new \Meilisearch\Client('http://localhost:7700');
+            $indexName = $this->getMeilisearchIndexName();
+            
+            $meilisearch->index($indexName)->deleteDocument($this->getKey());
+        } catch (\Exception $e) {
+            Log::info('Failed to remove from Meilisearch: ' . $e->getMessage());
+        }
+    }
 
     public function getMeilisearchIndexName(): string
-{
-    $prefix = config('data-encryption.meilisearch.index_prefix', 'encrypted_');
-
-    return $prefix . str_replace(
-        '\\',
-        '_',
-        strtolower(get_class($this))
-    );
-}
-
+    {
+        $prefix = config('data-encryption.meilisearch.index_prefix', 'encrypted_');
+        return $prefix . str_replace('\\', '_', strtolower(get_class($this)));
+    }
 }

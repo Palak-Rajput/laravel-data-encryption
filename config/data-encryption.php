@@ -1,3 +1,4 @@
+// config/data-encryption.php
 <?php
 
 return [
@@ -11,9 +12,11 @@ return [
         'cipher' => env('ENCRYPTION_CIPHER', 'AES-256-CBC'),
         'key' => env('ENCRYPTION_KEY', env('APP_KEY')),
     ],
-     'encrypted_fields' => [
+    
+    'encrypted_fields' => [
         'App\Models\User' => ['email', 'phone'],
     ],
+    
     'searchable_fields' => [
         'App\Models\User' => ['email', 'phone'],
     ],
@@ -36,31 +39,28 @@ return [
     */
     
     'meilisearch' => [
+        'enabled' => env('MEILISEARCH_ENABLED', true),
         'host' => env('MEILISEARCH_HOST', 'http://localhost:7700'),
         'key' => env('MEILISEARCH_KEY'),
         'index_prefix' => env('MEILISEARCH_INDEX_PREFIX', 'encrypted_'),
+        // Default index settings
+        'index_settings' => [
+            'searchableAttributes' => ['name', 'email_parts', 'phone_token'],
+            'filterableAttributes' => ['email_hash', 'phone_hash'],
+            'sortableAttributes' => ['created_at', 'name'],
+            'typoTolerance' => ['enabled' => true],
+        ],
     ],
     
     /*
     |--------------------------------------------------------------------------
-    | Fields to Encrypt by Default
+    | Partial Search Settings
     |--------------------------------------------------------------------------
     */
     
-    'default_fields' => [
-        'email',
-        'phone',
-        'ssn',
-        'credit_card',
-    ],
-    
-    /*
-    |--------------------------------------------------------------------------
-    | Models to Auto-Encrypt
-    |--------------------------------------------------------------------------
-    */
-    
-    'models' => [
-        // 'App\Models\User' => ['email', 'phone'],
+    'partial_search' => [
+        'enabled' => true,
+        'min_part_length' => 3, // Minimum length for n-grams
+        'email_separators' => ['@', '.', '-', '_', '+'],
     ],
 ];

@@ -4,8 +4,8 @@
     "type": "library",
     "license": "MIT",
     "authors": [{
-        "name": "Your Name",
-        "email": "your@email.com"
+        "name": "Palak Rajput",
+        "email": "palak@example.com"
     }],
     "require": {
         "php": "^8.1",
@@ -21,26 +21,22 @@
             "PalakRajput\\DataEncryption\\": "src/"
         }
     },
+    "autoload-dev": {
+        "psr-4": {
+            "PalakRajput\\DataEncryption\\Tests\\": "tests/"
+        }
+    },
     "scripts": {
         "post-autoload-dump": [
             "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
             "@php artisan package:discover --ansi"
-        ],
-        "post-install-cmd": [
-            "PalakRajput\\DataEncryption\\ComposerScripts::postInstall"
-        ],
-        "post-update-cmd": [
-            "PalakRajput\\DataEncryption\\ComposerScripts::postUpdate"
         ]
     },
     "extra": {
         "laravel": {
             "providers": [
                 "PalakRajput\\DataEncryption\\Providers\\DataEncryptionServiceProvider"
-            ],
-            "aliases": {
-                "DataEncryption": "PalakRajput\\DataEncryption\\Facades\\DataEncryption"
-            }
+            ]
         }
     },
     "minimum-stability": "stable",

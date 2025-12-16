@@ -7,6 +7,8 @@ use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
+use App\Models\User;
+use PalakRajput\DataEncryption\Services\MeilisearchService;
 
 class InstallEncryptionCommand extends Command
 {
@@ -75,7 +77,7 @@ class InstallEncryptionCommand extends Command
         }
     }
     
-  // In InstallEncryptionCommand.php autoSetupModels() method:
+
 protected function autoSetupModels($skipConfirm = false)
 {
     $this->info('🤖 Auto-configuring models...');
@@ -88,19 +90,55 @@ protected function autoSetupModels($skipConfirm = false)
             $backup = $this->option('backup') ? true : false;
 
             $this->call('data-encryption:encrypt', [
-                'model' => 'App\Models\User',
+                '--model' => 'App\Models\User',
                 '--backup' => $backup,
                 '--chunk' => 1000,
                 '--force' => $this->option('auto'),
             ]);
+            
+            // Reindex to Meilisearch for partial search
+            $this->info('🔍 Indexing to Meilisearch for partial search...');
+            $this->call('data-encryption:reindex', [
+                '--model' => 'App\Models\User',
+            ]);
 
-            $this->info('✅ User data encrypted successfully!');
+            // 🔧 Configure Meilisearch for partial search (ADD THIS SECTION)
+            $this->info('🔧 Configuring Meilisearch for partial search...');
+            
+            // Add the necessary imports at the top of the file
+            // use PalakRajput\DataEncryption\Services\MeilisearchService;
+            // use App\Models\User;
+            
+            $meilisearch = app(MeilisearchService::class);
+            $model = new User();
+            $indexName = $model->getMeilisearchIndexName();
+
+            // Force reinitialize index with proper settings
+            if ($meilisearch->initializeIndex($indexName)) {
+                $this->info("✅ Meilisearch index '{$indexName}' configured!");
+                
+                // Wait a bit for settings to apply
+                sleep(2);
+                
+                // Test search with sample data
+                $this->info("🧪 Testing search functionality...");
+                $testUsers = User::take(3)->get();
+                foreach ($testUsers as $user) {
+                    $user->indexToMeilisearch();
+                }
+                
+                $this->info("✅ Test data indexed. Partial search should now work!");
+            } else {
+                $this->error("❌ Failed to configure Meilisearch index");
+            }
+
+            $this->info('✅ Setup complete! Partial search is now enabled.');
+            $this->info('   Try searching for: gmail, user, @example.com, etc.');
         }
     } else {
         $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
     }
 }
-
     
  protected function setupUserModel()
 {
@@ -283,4 +321,5 @@ protected function addPropertiesToUserModel(&$content, $filePath)
         
         $this->info('💡 For automatic setup, run: php artisan data-encryption:install --auto');
     }
+    
 }

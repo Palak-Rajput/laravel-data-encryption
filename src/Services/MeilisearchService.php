@@ -4,6 +4,7 @@ namespace PalakRajput\DataEncryption\Services;
 
 use Meilisearch\Client;
 use Meilisearch\Exceptions\ApiException;
+use Illuminate\Support\Facades\Log;
 
 class MeilisearchService
 {
@@ -12,29 +13,42 @@ class MeilisearchService
 
     public function __construct()
     {
-        $this->config = config('data-encryption.meilisearch');
-
+        $this->config = config('data-encryption.meilisearch', []);
+        
         $this->client = new Client(
-            $this->config['host'],
-            $this->config['key']
+            $this->config['host'] ?? 'http://localhost:7700',
+            $this->config['key'] ?? ''
         );
     }
 
-    public function createIndex(string $indexName, array $searchableFields = [])
+    public function createIndex(string $indexName)
     {
         try {
-            $index = $this->client->index($indexName);
+            // First check if index exists
+            try {
+                $index = $this->client->index($indexName);
+                $index->fetchInfo(); // Test if index exists
+                return $index; // Index already exists
+            } catch (ApiException $e) {
+                // Index doesn't exist, create it
+                $index = $this->client->createIndex($indexName, ['primaryKey' => 'id']);
+                
+                // Configure for partial email search
+                $settings = [
+                    'searchableAttributes' => ['email_parts', 'name', 'phone_token'],
+                    'filterableAttributes' => ['email_hash', 'phone_hash'],
+                    'sortableAttributes' => ['created_at', 'name'],
+                ];
 
-            if (!empty($searchableFields)) {
-                $index->updateSearchableAttributes($searchableFields);
+                $index->updateSettings($settings);
+
+                return $index;
             }
-
-            $index->updateTypoTolerance(['enabled' => true]);
-            $index->updatePrefixSearch('all');
-
-            return $index;
         } catch (ApiException $e) {
-            if (config('app.debug')) throw $e;
+            Log::error('Failed to create/access Meilisearch index', [
+                'index' => $indexName,
+                'error' => $e->getMessage()
+            ]);
             return null;
         }
     }
@@ -42,29 +56,45 @@ class MeilisearchService
     public function indexDocument(string $indexName, array $document)
     {
         try {
-            $this->client
-                ->index($indexName)
-                ->addDocuments([$document]);
+            $index = $this->createIndex($indexName);
+            if ($index) {
+                $index->addDocuments([$document]);
+                return true;
+            }
+            return false;
         } catch (ApiException $e) {
-            if (config('app.debug')) throw $e;
+            Log::error('Failed to index document', [
+                'index' => $indexName,
+                'document_id' => $document['id'] ?? 'unknown',
+                'error' => $e->getMessage()
+            ]);
+            return false;
         }
     }
 
     public function search(string $indexName, string $query, array $fields = []): array
     {
         try {
+            $index = $this->client->index($indexName);
+            
             $params = [];
-
             if (!empty($fields)) {
                 $params['attributesToSearchOn'] = $fields;
             }
-
-            return $this->client
-                ->index($indexName)
-                ->search($query, $params)
-                ->getHits();
+            
+            $results = $index->search($query, $params);
+            return $results->getHits();
         } catch (ApiException $e) {
-            if (config('app.debug')) throw $e;
+            if ($e->getCode() === 404) {
+                // Index doesn't exist
+                Log::info("Meilisearch index {$indexName} doesn't exist yet");
+            } else {
+                Log::error('Meilisearch search failed', [
+                    'index' => $indexName,
+                    'query' => $query,
+                    'error' => $e->getMessage()
+                ]);
+            }
             return [];
         }
     }
@@ -74,7 +104,53 @@ class MeilisearchService
         try {
             $this->client->index($indexName)->deleteDocument($id);
         } catch (ApiException $e) {
-            if (config('app.debug')) throw $e;
+            Log::error('Failed to delete document', [
+                'index' => $indexName,
+                'document_id' => $id,
+                'error' => $e->getMessage()
+            ]);
         }
+    }
+
+    /**
+     * Initialize index with email_parts searchable
+     */
+    public function initializeIndex(string $indexName): bool
+    {
+        try {
+            $index = $this->createIndex($indexName);
+            
+            if (!$index) {
+                return false;
+            }
+            
+            // Update settings for optimal partial search
+            $settings = [
+                'searchableAttributes' => ['email_parts', 'name', 'phone_token'],
+                'filterableAttributes' => ['email_hash', 'phone_hash'],
+                'sortableAttributes' => ['created_at', 'name'],
+            ];
+            
+            $index->updateSettings($settings);
+            
+            // Wait for the update to be processed
+            sleep(1);
+            
+            return true;
+        } catch (ApiException $e) {
+            Log::error('Meilisearch initialization failed', [
+                'error' => $e->getMessage(),
+                'index' => $indexName
+            ]);
+            return false;
+        }
+    }
+    
+    /**
+     * Get client instance
+     */
+    public function getClient(): Client
+    {
+        return $this->client;
     }
 }
