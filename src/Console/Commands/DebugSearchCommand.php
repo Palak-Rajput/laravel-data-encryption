@@ -77,9 +77,7 @@ class DebugSearchCommand extends Command
             if (!empty($results)) {
                 $this->info("\n📝 Sample results:");
                 foreach (array_slice($results, 0, 3) as $result) {
-$name = $result['name'] ?? 'N/A';
-
-$this->line("  - ID: {$result['id']}, Name: {$name}");
+                    $this->line("  - ID: {$result['id']}, Name: {$result['name'] ?? 'N/A'}");
                 }
             }
             
