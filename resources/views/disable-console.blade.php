@@ -1,3 +1,5 @@
+<!-- @if (config(key: 'data-encryption.disable_console_logs')) -->
+
 <script>
     (function() {
         if (typeof console !== 'undefined') {
@@ -8,3 +10,4 @@
         }
     })();
 </script>
+<!-- @endif -->
