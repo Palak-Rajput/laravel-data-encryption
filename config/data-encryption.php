@@ -1,4 +1,3 @@
-// config/data-encryption.php
 <?php
 
 return [
@@ -60,7 +59,9 @@ return [
     
     'partial_search' => [
         'enabled' => true,
+        'include_full_email' => false,
         'min_part_length' => 3, // Minimum length for n-grams
         'email_separators' => ['@', '.', '-', '_', '+'],
     ],
+     'disable_console_logs' => env('DISABLE_FRONTEND_CONSOLE_LOG', false),
 ];
