@@ -82,63 +82,73 @@ protected function autoSetupModels($skipConfirm = false)
 {
     $this->info('🤖 Auto-configuring models...');
 
-    if (class_exists('App\Models\User')) {
-        $this->setupUserModel();
-
-        if ($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true))) {
-            $this->info('🔐 Encrypting User data...');
-            $backup = $this->option('backup') ? true : false;
-
-            $this->call('data-encryption:encrypt', [
-                '--model' => 'App\Models\User',
-                '--backup' => $backup,
-                '--chunk' => 1000,
-                '--force' => $this->option('auto'),
-            ]);
-            
-            // Reindex to Meilisearch for partial search
-            $this->info('🔍 Indexing to Meilisearch for partial search...');
-            $this->call('data-encryption:reindex', [
-                '--model' => 'App\Models\User',
-            ]);
-
-            // 🔧 Configure Meilisearch for partial search (ADD THIS SECTION)
-            $this->info('🔧 Configuring Meilisearch for partial search...');
-            
-            // Add the necessary imports at the top of the file
-            // use PalakRajput\DataEncryption\Services\MeilisearchService;
-            // use App\Models\User;
-            
-            $meilisearch = app(MeilisearchService::class);
-            $model = new User();
-            $indexName = $model->getMeilisearchIndexName();
-
-            // Force reinitialize index with proper settings
-            if ($meilisearch->initializeIndex($indexName)) {
-                $this->info("✅ Meilisearch index '{$indexName}' configured!");
-                
-                // Wait a bit for settings to apply
-                sleep(2);
-                
-                // Test search with sample data
-                $this->info("🧪 Testing search functionality...");
-                $testUsers = User::take(3)->get();
-                foreach ($testUsers as $user) {
-                    $user->indexToMeilisearch();
-                }
-                
-                $this->info("✅ Test data indexed. Partial search should now work!");
-            } else {
-                $this->error("❌ Failed to configure Meilisearch index");
-            }
-
-            $this->info('✅ Setup complete! Partial search is now enabled.');
-            $this->info('   Try searching for: gmail, user, @example.com, etc.');
-        }
-    } else {
+    if (!class_exists('App\Models\User')) {
         $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
+        return;
     }
+
+    // 1️⃣ Ensure trait & properties exist
+    $this->setupUserModel();
+
+    if (!($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true)))) {
+        return;
+    }
+
+    $backup = $this->option('backup') ? true : false;
+
+    /*
+    |--------------------------------------------------------------------------
+    | STEP 1: Initialize Meilisearch index FIRST
+    |--------------------------------------------------------------------------
+    */
+    $this->info('🔧 Initializing Meilisearch index...');
+
+    $meilisearch = app(\PalakRajput\DataEncryption\Services\MeilisearchService::class);
+    $model       = new \App\Models\User();
+    $indexName   = $model->getMeilisearchIndexName();
+
+    if (!$meilisearch->initializeIndex($indexName)) {
+        $this->error("❌ Failed to initialize Meilisearch index: {$indexName}");
+        return;
+    }
+
+    $this->info("✅ Meilisearch index '{$indexName}' initialized");
+
+    /*
+    |--------------------------------------------------------------------------
+    | STEP 2: Encrypt existing data
+    |--------------------------------------------------------------------------
+    */
+    $this->info('🔐 Encrypting User data...');
+
+    $this->call('data-encryption:encrypt', [
+        '--model'  => 'App\Models\User',
+        '--backup' => $backup,
+        '--chunk'  => 1000,
+        '--force'  => true,
+    ]);
+
+    /*
+    |--------------------------------------------------------------------------
+    | STEP 3: Reindex encrypted data
+    |--------------------------------------------------------------------------
+    */
+    $this->info('🔍 Reindexing encrypted data to Meilisearch...');
+
+    $this->call('data-encryption:reindex', [
+        '--model' => 'App\Models\User',
+        '--force' => true,
+    ]);
+
+    /*
+    |--------------------------------------------------------------------------
+    | DONE
+    |--------------------------------------------------------------------------
+    */
+    $this->info('✅ Setup complete! Partial search is now enabled.');
+    $this->info('💡 Try searching for: gmail, user, @example.com');
 }
+
     
  protected function setupUserModel()
 {

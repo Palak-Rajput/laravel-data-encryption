@@ -122,36 +122,38 @@ class MeilisearchService
     /**
      * Initialize index with email_parts searchable
      */
-    public function initializeIndex(string $indexName): bool
-    {
+  public function initializeIndex(string $indexName)
+{
+    try {
+        // Create index if not exists
         try {
-            $index = $this->createIndex($indexName);
-            
-            if (!$index) {
-                return false;
-            }
-            
-            // Update settings for optimal partial search
-            $settings = [
-                'searchableAttributes' => ['name'],
-                'filterableAttributes' => ['email_hash', 'phone_hash'],
-                'sortableAttributes' => ['created_at', 'name'],
-            ];
-            
-            $index->updateSettings($settings);
-            
-            // Wait for the update to be processed
-            sleep(1);
-            
-            return true;
-        } catch (ApiException $e) {
-            Log::error('Meilisearch initialization failed', [
-                'error' => $e->getMessage(),
-                'index' => $indexName
-            ]);
-            return false;
+            $index = $this->client->index($indexName);
+            $index->fetchInfo();
+        } catch (\Throwable $e) {
+            $this->client->createIndex($indexName, ['primaryKey' => 'id']);
+            $index = $this->client->index($indexName);
         }
+
+        // Apply settings
+        $task = $index->updateSettings([
+            'searchableAttributes' => ['email_parts', 'name'],
+            'filterableAttributes' => ['email_hash', 'phone_hash'],
+            'sortableAttributes'   => ['created_at', 'name'],
+        ]);
+
+        // ⏳ WAIT FOR SETTINGS TO APPLY
+        $this->client->waitForTask($task['taskUid']);
+
+        return $index;
+    } catch (\Throwable $e) {
+        Log::error('Meilisearch index initialization failed', [
+            'index' => $indexName,
+            'error' => $e->getMessage(),
+        ]);
+        return null;
     }
+}
+
     
     /**
      * Get client instance
