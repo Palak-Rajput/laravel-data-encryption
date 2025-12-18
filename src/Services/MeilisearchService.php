@@ -35,7 +35,7 @@ class MeilisearchService
                 
                 // Configure for partial email search
                 $settings = [
-                    'searchableAttributes' => ['email_parts', 'name', 'phone_token'],
+                    'searchableAttributes' => ['email_parts'],
                     'filterableAttributes' => ['email_hash', 'phone_hash'],
                     'sortableAttributes' => ['created_at', 'name'],
                 ];

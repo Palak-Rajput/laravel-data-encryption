@@ -44,7 +44,7 @@ return [
         'index_prefix' => env('MEILISEARCH_INDEX_PREFIX', 'encrypted_'),
         // Default index settings
         'index_settings' => [
-            'searchableAttributes' => ['name', 'email_parts', 'phone_token'],
+            'searchableAttributes' => ['name'],
             'filterableAttributes' => ['email_hash', 'phone_hash'],
             'sortableAttributes' => ['created_at', 'name'],
             'typoTolerance' => ['enabled' => true],
