@@ -126,7 +126,7 @@ class MeilisearchService
             
             // Update settings for optimal partial search
             $settings = [
-                'searchableAttributes' => ['email_parts', 'name', 'phone_token'],
+                'searchableAttributes' => ['name'],
                 'filterableAttributes' => ['email_hash', 'phone_hash'],
                 'sortableAttributes' => ['created_at', 'name'],
             ];

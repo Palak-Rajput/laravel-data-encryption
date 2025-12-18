@@ -195,11 +195,7 @@ class EncryptDataCommand extends Command
                         $hashField = $field . '_hash';
                         $updateData[$hashField] = $hashService->hash($value);
                         
-                        // For phone, create phone token
-                        if ($field === 'phone') {
-                            $digits = preg_replace('/\D+/', '', $value);
-                            $updateData['phone_token'] = !empty($digits) ? $digits : null;
-                        }
+                       
                     }
                 }
                 
