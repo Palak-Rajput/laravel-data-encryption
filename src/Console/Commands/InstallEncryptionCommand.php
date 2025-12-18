@@ -264,24 +264,88 @@ protected function addPropertiesToUserModel(&$content, $filePath)
     }
     
     protected function setupMeilisearch()
-    {
-        $this->info('📊 Setting up Meilisearch...');
-        
-        // Check if Meilisearch is running
-        $host = env('MEILISEARCH_HOST', 'http://localhost:7700');
-        
-        $this->line("Meilisearch host: {$host}");
-        $this->line('📖 Documentation: https://www.meilisearch.com/docs');
-        
-        // Test connection (optional)
-        try {
-            $client = new \Meilisearch\Client($host);
-            $health = $client->health();
-            $this->info('✅ Meilisearch connection successful');
-        } catch (\Exception $e) {
-            $this->warn('⚠️  Cannot connect to Meilisearch. Please ensure it\'s running.');
-        }
+{
+    $this->info('📊 Setting up Meilisearch...');
+
+    $host = env('MEILISEARCH_HOST', 'http://localhost:7700');
+    $this->line("Meilisearch host: {$host}");
+
+    // 1️⃣ Check if already running
+    try {
+        $client = new \Meilisearch\Client($host);
+        $client->health();
+        $this->info('✅ Meilisearch is already running');
+        return;
+    } catch (\Throwable $e) {
+        $this->warn('⚠️  Meilisearch not running. Installing...');
     }
+
+    // 2️⃣ Detect OS
+    $os = PHP_OS_FAMILY;
+
+    $binaries = [
+        'Windows' => [
+            'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-windows-amd64.exe',
+            'file' => 'meilisearch.exe',
+        ],
+        'Linux' => [
+            'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-linux-amd64',
+            'file' => 'meilisearch',
+        ],
+        'Darwin' => [
+            'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-macos-amd64',
+            'file' => 'meilisearch',
+        ],
+    ];
+
+    if (!isset($binaries[$os])) {
+        $this->error("❌ Unsupported OS: {$os}");
+        return;
+    }
+
+    $binaryPath = base_path($binaries[$os]['file']);
+
+    // 3️⃣ Download binary if missing
+    if (!file_exists($binaryPath)) {
+        $this->info('⬇️ Downloading Meilisearch binary...');
+        file_put_contents(
+            $binaryPath,
+            fopen($binaries[$os]['url'], 'r')
+        );
+
+        if ($os !== 'Windows') {
+            chmod($binaryPath, 0755);
+        }
+
+        $this->info('✅ Meilisearch downloaded');
+    } else {
+        $this->info('ℹ️ Meilisearch binary already exists');
+    }
+
+    // 4️⃣ Start server
+    $this->info('🚀 Starting Meilisearch server...');
+
+    if ($os === 'Windows') {
+        pclose(popen(
+            'start /B "" "' . $binaryPath . '"',
+            'r'
+        ));
+    } else {
+        exec($binaryPath . ' > /dev/null 2>&1 &');
+    }
+
+    // 5️⃣ Wait & verify
+    sleep(2);
+
+    try {
+        $client = new \Meilisearch\Client($host);
+        $client->health();
+        $this->info('✅ Meilisearch started successfully');
+    } catch (\Throwable $e) {
+        $this->error('❌ Failed to start Meilisearch');
+    }
+}
+
     
     protected function showNextSteps()
     {
