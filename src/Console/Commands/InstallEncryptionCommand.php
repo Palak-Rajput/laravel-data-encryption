@@ -263,12 +263,19 @@ protected function addPropertiesToUserModel(&$content, $filePath)
         }
     }
     
-    protected function setupMeilisearch()
+ protected function setupMeilisearch()
 {
     $this->info('📊 Setting up Meilisearch...');
 
-    $host = env('MEILISEARCH_HOST', 'http://localhost:7700');
+    $host = env('MEILISEARCH_HOST', 'http://127.0.0.1:7700');
     $this->line("Meilisearch host: {$host}");
+
+    // Package-specific data directory (VERY IMPORTANT)
+    $dataDir = storage_path('data-encryption/meilisearch');
+
+    if (!is_dir($dataDir)) {
+        mkdir($dataDir, 0755, true);
+    }
 
     // 1️⃣ Check if already running
     try {
@@ -308,10 +315,7 @@ protected function addPropertiesToUserModel(&$content, $filePath)
     // 3️⃣ Download binary if missing
     if (!file_exists($binaryPath)) {
         $this->info('⬇️ Downloading Meilisearch binary...');
-        file_put_contents(
-            $binaryPath,
-            fopen($binaries[$os]['url'], 'r')
-        );
+        file_put_contents($binaryPath, fopen($binaries[$os]['url'], 'r'));
 
         if ($os !== 'Windows') {
             chmod($binaryPath, 0755);
@@ -322,29 +326,31 @@ protected function addPropertiesToUserModel(&$content, $filePath)
         $this->info('ℹ️ Meilisearch binary already exists');
     }
 
-    // 4️⃣ Start server
+    // 4️⃣ Start Meilisearch WITH CUSTOM DATA DIR
     $this->info('🚀 Starting Meilisearch server...');
 
+    $command = "\"{$binaryPath}\" --db-path=\"{$dataDir}\"";
+
     if ($os === 'Windows') {
-        pclose(popen(
-            'start /B "" "' . $binaryPath . '"',
-            'r'
-        ));
+        pclose(popen("start /B \"Meilisearch\" {$command}", 'r'));
     } else {
-        exec($binaryPath . ' > /dev/null 2>&1 &');
+        exec($command . ' > /dev/null 2>&1 &');
     }
 
     // 5️⃣ Wait & verify
-    sleep(2);
+    sleep(3);
 
     try {
         $client = new \Meilisearch\Client($host);
         $client->health();
         $this->info('✅ Meilisearch started successfully');
+        $this->line("📂 Data directory: {$dataDir}");
     } catch (\Throwable $e) {
         $this->error('❌ Failed to start Meilisearch');
+        $this->warn('👉 If this persists, delete: ' . $dataDir);
     }
 }
+
 
     
     protected function showNextSteps()
