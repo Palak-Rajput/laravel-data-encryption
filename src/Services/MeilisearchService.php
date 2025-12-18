@@ -21,37 +21,44 @@ class MeilisearchService
         );
     }
 
-    public function createIndex(string $indexName)
-    {
+  public function createIndex(string $indexName)
+{
+    try {
+        // Try to get existing index
         try {
-            // First check if index exists
-            try {
-                $index = $this->client->index($indexName);
-                $index->fetchInfo(); // Test if index exists
-                return $index; // Index already exists
-            } catch (ApiException $e) {
-                // Index doesn't exist, create it
-                $index = $this->client->createIndex($indexName, ['primaryKey' => 'id']);
-                
-                // Configure for partial email search
-                $settings = [
-                    'searchableAttributes' => ['email_parts'],
-                    'filterableAttributes' => ['email_hash', 'phone_hash'],
-                    'sortableAttributes' => ['created_at', 'name'],
-                ];
-
-                $index->updateSettings($settings);
-
-                return $index;
-            }
+            $index = $this->client->index($indexName);
+            $index->fetchInfo(); // Throws if not exists
+            return $index;
         } catch (ApiException $e) {
-            Log::error('Failed to create/access Meilisearch index', [
-                'index' => $indexName,
-                'error' => $e->getMessage()
+            // Index does not exist → create it
+            $this->client->createIndex($indexName, [
+                'primaryKey' => 'id',
             ]);
-            return null;
+
+            // IMPORTANT: fetch Index object AFTER creation
+            $index = $this->client->index($indexName);
+
+            // Initial settings
+            $settings = [
+                'searchableAttributes' => ['email_parts', 'name'],
+                'filterableAttributes' => ['email_hash', 'phone_hash'],
+                'sortableAttributes'   => ['created_at', 'name'],
+            ];
+
+            $index->updateSettings($settings);
+
+            return $index;
         }
+    } catch (ApiException $e) {
+        Log::error('Failed to create/access Meilisearch index', [
+            'index' => $indexName,
+            'error' => $e->getMessage(),
+        ]);
+
+        return null;
     }
+}
+
 
     public function indexDocument(string $indexName, array $document)
     {
