@@ -3,12 +3,10 @@
     "description": "Encrypt sensitive data while maintaining searchability with Meilisearch",
     "type": "library",
     "license": "MIT",
-    "authors": [
-        {
-            "name": "Palak Rajput",
-            "email": "palak@example.com"
-        }
-    ],
+    "authors": [{
+        "name": "Palak Rajput",
+        "email": "palak@example.com"
+    }],
     "require": {
         "php": "^8.1",
         "laravel/framework": "^10.0|^11.0",
@@ -32,12 +30,6 @@
         "post-autoload-dump": [
             "Illuminate\\Foundation\\ComposerScripts::postAutoloadDump",
             "@php artisan package:discover --ansi"
-        ],
-        "post-install-cmd": [
-            "@php artisan data-encryption:install --no-interaction"
-        ],
-        "post-update-cmd": [
-            "@php artisan data-encryption:install --no-interaction"
         ]
     },
     "extra": {
