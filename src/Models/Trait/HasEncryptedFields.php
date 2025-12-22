@@ -6,9 +6,20 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 trait HasEncryptedFields
 {
+    /**
+     * Cached list of encrypted fields for each model
+     */
+    protected static $cachedEncryptedFields = [];
+
+    /**
+     * Cached list of searchable hash fields for each model
+     */
+    protected static $cachedSearchableHashFields = [];
+
     protected static function bootHasEncryptedFields()
     {
         static::saving(function ($model) {
@@ -32,6 +43,128 @@ trait HasEncryptedFields
         });
     }
 
+    /**
+     * Auto-detect fields that should be encrypted
+     */
+    protected function getAutoDetectedFields(): array
+    {
+        $modelClass = get_class($this);
+        
+        // Return cached fields if already detected
+        if (isset(static::$cachedEncryptedFields[$modelClass])) {
+            return static::$cachedEncryptedFields[$modelClass];
+        }
+        
+        $table = $this->getTable();
+        $columns = Schema::getColumnListing($table);
+        
+        // Default sensitive field patterns to look for
+        $sensitivePatterns = [
+            'email', 'phone', 'mobile', 'telephone',
+            'ssn', 'social_security', 'tax_id',
+            'credit_card', 'card_number',
+            'passport', 'driver_license',
+            'address', 'street', 'city', 'zip', 'postal_code',
+            'dob', 'date_of_birth', 'birth_date',
+            'national_id', 'identity_number'
+        ];
+        
+        $encryptedFields = [];
+        
+        foreach ($columns as $column) {
+            $columnLower = strtolower($column);
+            
+            // Check if column matches any sensitive pattern
+            foreach ($sensitivePatterns as $pattern) {
+                if (str_contains($columnLower, $pattern)) {
+                    $encryptedFields[] = $column;
+                    break;
+                }
+            }
+            
+            // Special case for common email variations
+            if (preg_match('/^(email|e_mail|mail)$/i', $column)) {
+                $encryptedFields[] = $column;
+            }
+            
+            // Special case for common phone variations
+            if (preg_match('/^(phone|mobile|tel|telephone|contact_number)$/i', $column)) {
+                $encryptedFields[] = $column;
+            }
+        }
+        
+        // Remove duplicates
+        $encryptedFields = array_unique($encryptedFields);
+        
+        // Cache the result
+        static::$cachedEncryptedFields[$modelClass] = $encryptedFields;
+        
+        return $encryptedFields;
+    }
+
+    /**
+     * Get fields that should be searchable via hash
+     */
+    protected function getSearchableHashFields(): array
+    {
+        $modelClass = get_class($this);
+        
+        // Return cached fields if already detected
+        if (isset(static::$cachedSearchableHashFields[$modelClass])) {
+            return static::$cachedSearchableHashFields[$modelClass];
+        }
+        
+        $encryptedFields = $this->getEncryptedFields();
+        $searchableHashFields = [];
+        
+        // By default, make email and phone fields searchable
+        foreach ($encryptedFields as $field) {
+            $fieldLower = strtolower($field);
+            
+            // Make these field types searchable
+            if (str_contains($fieldLower, 'email') || 
+                str_contains($fieldLower, 'phone') ||
+                str_contains($fieldLower, 'mobile') ||
+                str_contains($fieldLower, 'ssn') ||
+                str_contains($fieldLower, 'tax_id')) {
+                $searchableHashFields[] = $field;
+            }
+        }
+        
+        // Cache the result
+        static::$cachedSearchableHashFields[$modelClass] = $searchableHashFields;
+        
+        return $searchableHashFields;
+    }
+
+    /**
+     * Get all fields to encrypt (auto-detected or manually configured)
+     */
+    protected function getEncryptedFields(): array
+    {
+        // First check for manually configured fields
+        if (isset(static::$encryptedFields) && !empty(static::$encryptedFields)) {
+            return static::$encryptedFields;
+        }
+        
+        // Auto-detect fields
+        return $this->getAutoDetectedFields();
+    }
+
+    /**
+     * Get all searchable hash fields (auto-detected or manually configured)
+     */
+    protected function getSearchableHashFieldsList(): array
+    {
+        // First check for manually configured fields
+        if (isset(static::$searchableHashFields) && !empty(static::$searchableHashFields)) {
+            return static::$searchableHashFields;
+        }
+        
+        // Auto-detect fields
+        return $this->getSearchableHashFields();
+    }
+
     public function indexToMeilisearch()
     {
         if (!config('data-encryption.meilisearch.enabled', true)) {
@@ -53,23 +186,26 @@ trait HasEncryptedFields
     {
         $document = [
             'id' => (string) $this->getKey(),
-            'name' => $this->name ?? null,
-            'email' => $this->email ?? null,
+            'model_type' => get_class($this),
             'created_at' => $this->created_at ? $this->created_at->timestamp : null,
         ];
 
-        // Add hash fields if they exist
-        if (isset($this->email_hash)) {
-            $document['email_hash'] = $this->email_hash;
-        }
-        
-        if (isset($this->phone_hash)) {
-            $document['phone_hash'] = $this->phone_hash;
+        // Add name if the model has it
+        if (isset($this->name)) {
+            $document['name'] = $this->name;
         }
 
-        // Extract email parts for search
-        if (!empty($this->email)) {
-            $document['email_parts'] = $this->extractEmailPartsForSearch($this->email);
+        // Add all encrypted fields with their hashes
+        foreach ($this->getEncryptedFields() as $field) {
+            $hashField = $field . '_hash';
+            if (isset($this->$hashField)) {
+                $document[$hashField] = $this->$hashField;
+            }
+            
+            // Extract email parts for email fields
+            if (str_contains(strtolower($field), 'email') && !empty($this->$field)) {
+                $document['email_parts'] = $this->extractEmailPartsForSearch($this->$field);
+            }
         }
 
         return array_filter($document, function($value) {
@@ -109,7 +245,7 @@ trait HasEncryptedFields
 
     public function encryptFields()
     {
-        foreach (static::$encryptedFields ?? [] as $field) {
+        foreach ($this->getEncryptedFields() as $field) {
             if (!empty($this->attributes[$field]) && !$this->isEncrypted($this->attributes[$field])) {
                 // Encrypt
                 $this->attributes[$field] = Crypt::encryptString($this->attributes[$field]);
@@ -130,7 +266,7 @@ trait HasEncryptedFields
 
     public function decryptFields()
     {
-        foreach (static::$encryptedFields ?? [] as $field) {
+        foreach ($this->getEncryptedFields() as $field) {
             if (!empty($this->attributes[$field]) && $this->isEncrypted($this->attributes[$field])) {
                 try {
                     $this->attributes[$field] = Crypt::decryptString($this->attributes[$field]);
@@ -183,12 +319,14 @@ trait HasEncryptedFields
             // Hash search
             $hashedQuery = hash('sha256', 'laravel-data-encryption' . $query);
             
-            foreach (static::$searchableHashFields ?? [] as $field) {
+            foreach ($model->getSearchableHashFieldsList() as $field) {
                 $q->orWhere($field . '_hash', $hashedQuery);
             }
             
-            // Name search
-            $q->orWhere('name', 'like', "%{$query}%");
+            // Name search if column exists
+            if (Schema::hasColumn($model->getTable(), 'name')) {
+                $q->orWhere('name', 'like', "%{$query}%");
+            }
         });
     }
 
@@ -212,5 +350,48 @@ trait HasEncryptedFields
     {
         $prefix = config('data-encryption.meilisearch.index_prefix', 'encrypted_');
         return $prefix . str_replace('\\', '_', strtolower(get_class($this)));
+    }
+
+    /**
+     * Get information about encrypted fields for debugging
+     */
+    public function getEncryptionInfo(): array
+    {
+        return [
+            'model' => get_class($this),
+            'table' => $this->getTable(),
+            'encrypted_fields' => $this->getEncryptedFields(),
+            'searchable_hash_fields' => $this->getSearchableHashFieldsList(),
+            'has_email' => $this->hasEmailField(),
+            'has_phone' => $this->hasPhoneField(),
+        ];
+    }
+
+    /**
+     * Check if model has email field
+     */
+    protected function hasEmailField(): bool
+    {
+        foreach ($this->getEncryptedFields() as $field) {
+            if (str_contains(strtolower($field), 'email')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Check if model has phone field
+     */
+    protected function hasPhoneField(): bool
+    {
+        foreach ($this->getEncryptedFields() as $field) {
+            if (str_contains(strtolower($field), 'phone') || 
+                str_contains(strtolower($field), 'mobile') ||
+                str_contains(strtolower($field), 'tel')) {
+                return true;
+            }
+        }
+        return false;
     }
 }

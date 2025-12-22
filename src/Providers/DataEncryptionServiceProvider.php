@@ -9,6 +9,8 @@ use PalakRajput\DataEncryption\Services\HashService;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\Contracts\Http\Kernel;
 use PalakRajput\DataEncryption\Http\Middleware\InjectDisableConsole;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Database\Eloquent\Model;
 
 class DataEncryptionServiceProvider extends ServiceProvider
 {
@@ -59,6 +61,113 @@ class DataEncryptionServiceProvider extends ServiceProvider
         return new \Meilisearch\Client($host, $key);
     }
 
+    /**
+     * Auto-discover all models with email/phone columns
+     */
+    private function discoverModelsWithSensitiveData(): array
+    {
+        $models = [];
+        
+        // Get all Eloquent models from the app
+        $modelFiles = $this->getModelFiles();
+        
+        foreach ($modelFiles as $modelFile) {
+            $modelClass = $this->getModelClassFromFile($modelFile);
+            
+            if ($modelClass && class_exists($modelClass)) {
+                try {
+                    $model = new $modelClass();
+                    
+                    if ($model instanceof Model) {
+                        $table = $model->getTable();
+                        
+                        // Check if table has sensitive columns
+                        if (Schema::hasTable($table)) {
+                            $columns = Schema::getColumnListing($table);
+                            
+                            $hasSensitiveData = false;
+                            $sensitiveFields = [];
+                            
+                            foreach ($columns as $column) {
+                                $columnLower = strtolower($column);
+                                
+                                // Check for email fields
+                                if (str_contains($columnLower, 'email') || 
+                                    preg_match('/^(email|e_mail|mail)$/i', $column)) {
+                                    $hasSensitiveData = true;
+                                    $sensitiveFields[] = $column;
+                                }
+                                
+                                // Check for phone fields
+                                if (str_contains($columnLower, 'phone') || 
+                                    str_contains($columnLower, 'mobile') ||
+                                    str_contains($columnLower, 'tel') ||
+                                    preg_match('/^(phone|mobile|tel|telephone|contact_number)$/i', $column)) {
+                                    $hasSensitiveData = true;
+                                    $sensitiveFields[] = $column;
+                                }
+                            }
+                            
+                            if ($hasSensitiveData) {
+                                $models[$modelClass] = array_unique($sensitiveFields);
+                            }
+                        }
+                    }
+                } catch (\Exception $e) {
+                    // Skip models that can't be instantiated
+                    continue;
+                }
+            }
+        }
+        
+        return $models;
+    }
+    
+    /**
+     * Get all model files from app/Models directory
+     */
+    private function getModelFiles(): array
+    {
+        $modelsPath = app_path('Models');
+        $modelFiles = [];
+        
+        if (file_exists($modelsPath)) {
+            $modelFiles = glob($modelsPath . '/*.php');
+        }
+        
+        // Also check for older Laravel structure (app/User.php)
+        if ($this->getLaravelMajorVersion() < 8) {
+            $userModelPath = app_path('User.php');
+            if (file_exists($userModelPath)) {
+                $modelFiles[] = $userModelPath;
+            }
+        }
+        
+        return $modelFiles;
+    }
+    
+    /**
+     * Get model class name from file path
+     */
+    private function getModelClassFromFile(string $filePath): ?string
+    {
+        $content = file_get_contents($filePath);
+        
+        // Extract namespace
+        preg_match('/namespace\s+([^;]+);/', $content, $namespaceMatch);
+        $namespace = $namespaceMatch[1] ?? 'App\\Models';
+        
+        // Extract class name
+        preg_match('/class\s+(\w+)/', $content, $classMatch);
+        $className = $classMatch[1] ?? null;
+        
+        if ($className) {
+            return $namespace . '\\' . $className;
+        }
+        
+        return null;
+    }
+
     public function register()
     {
         // Ensure config exists before merging
@@ -69,6 +178,9 @@ class DataEncryptionServiceProvider extends ServiceProvider
             // Fallback config for older Laravel versions
             $this->app['config']->set('data-encryption', $this->getDefaultConfig());
         }
+
+        // Auto-discover and configure models
+        $this->autoConfigureAllModels();
 
         // Bind services with version compatibility
         $this->app->singleton(EncryptionService::class, function ($app) {
@@ -150,11 +262,58 @@ class DataEncryptionServiceProvider extends ServiceProvider
                 \PalakRajput\DataEncryption\Console\Commands\EncryptDataCommand::class,
                 \PalakRajput\DataEncryption\Console\Commands\ReindexMeilisearch::class,
                 \PalakRajput\DataEncryption\Console\Commands\DebugSearchCommand::class,
+                \PalakRajput\DataEncryption\Console\Commands\DiscoverModelsCommand::class, // New command
             ]);
         }
 
-        // Auto-detect and configure User model based on Laravel version
-        $this->autoConfigureModels();
+        // Auto-configure models on boot as well (in case config was cleared)
+        $this->autoConfigureAllModels();
+    }
+
+    /**
+     * Auto-configure all models with sensitive data
+     */
+    private function autoConfigureAllModels()
+    {
+        // Only auto-configure if enabled in config
+        if (!config('data-encryption.auto_discover', true)) {
+            return;
+        }
+
+        $discoveredModels = $this->discoverModelsWithSensitiveData();
+        
+        if (!empty($discoveredModels)) {
+            $currentConfig = config('data-encryption.encrypted_fields', []);
+            $currentSearchableConfig = config('data-encryption.searchable_fields', []);
+            
+            // Merge discovered models with existing config
+            foreach ($discoveredModels as $modelClass => $fields) {
+                if (!isset($currentConfig[$modelClass])) {
+                    $currentConfig[$modelClass] = $fields;
+                    
+                    // Make email and phone fields searchable by default
+                    $searchableFields = [];
+                    foreach ($fields as $field) {
+                        $fieldLower = strtolower($field);
+                        if (str_contains($fieldLower, 'email') || 
+                            str_contains($fieldLower, 'phone') ||
+                            str_contains($fieldLower, 'mobile')) {
+                            $searchableFields[] = $field;
+                        }
+                    }
+                    
+                    if (!empty($searchableFields)) {
+                        $currentSearchableConfig[$modelClass] = $searchableFields;
+                    }
+                }
+            }
+            
+            // Update config
+            config([
+                'data-encryption.encrypted_fields' => $currentConfig,
+                'data-encryption.searchable_fields' => $currentSearchableConfig,
+            ]);
+        }
     }
 
     /**
@@ -171,35 +330,10 @@ class DataEncryptionServiceProvider extends ServiceProvider
         $timestamp = date('Y_m_d_His');
         
         $this->publishes([
-            // Main migration
-            $migrationsPath . '/add_hash_columns_to_users_table.php' => 
-                database_path("migrations/{$timestamp}_add_hash_columns_to_users_table.php"),
+            // Main migration - now creates hash columns for all tables
+            $migrationsPath . '/add_hash_columns_to_all_tables.php' => 
+                database_path("migrations/{$timestamp}_add_hash_columns_to_all_tables.php"),
         ], 'migrations');
-    }
-
-    /**
-     * Auto-configure models based on Laravel version
-     */
-    private function autoConfigureModels()
-    {
-        $laravelVersion = $this->getLaravelMajorVersion();
-        
-        // Laravel 8+ uses App\Models\User, older versions use App\User
-        $userModel = $laravelVersion >= 8 ? 'App\Models\User' : 'App\User';
-        
-        // Update config if it exists
-        $config = config('data-encryption', []);
-        
-        if (!isset($config['encrypted_fields'][$userModel])) {
-            config([
-                'data-encryption.encrypted_fields' => [
-                    $userModel => ['email', 'phone']
-                ],
-                'data-encryption.searchable_fields' => [
-                    $userModel => ['email', 'phone']
-                ]
-            ]);
-        }
     }
 
     /**
@@ -210,17 +344,40 @@ class DataEncryptionServiceProvider extends ServiceProvider
         $laravelVersion = $this->getLaravelMajorVersion();
         $userModel = $laravelVersion >= 8 ? 'App\Models\User' : 'App\User';
         
+        // Auto-discover models for default config
+        $discoveredModels = $this->discoverModelsWithSensitiveData();
+        
+        // If no models discovered, use User as default
+        if (empty($discoveredModels)) {
+            $discoveredModels = [
+                $userModel => ['email', 'phone']
+            ];
+        }
+        
+        // Build searchable fields config
+        $searchableFields = [];
+        foreach ($discoveredModels as $modelClass => $fields) {
+            $searchable = [];
+            foreach ($fields as $field) {
+                $fieldLower = strtolower($field);
+                if (str_contains($fieldLower, 'email') || 
+                    str_contains($fieldLower, 'phone') ||
+                    str_contains($fieldLower, 'mobile')) {
+                    $searchable[] = $field;
+                }
+            }
+            if (!empty($searchable)) {
+                $searchableFields[$modelClass] = $searchable;
+            }
+        }
+        
         return [
             'encryption' => [
                 'cipher' => 'AES-256-CBC',
                 'key' => env('ENCRYPTION_KEY', env('APP_KEY')),
             ],
-            'encrypted_fields' => [
-                $userModel => ['email', 'phone'],
-            ],
-            'searchable_fields' => [
-                $userModel => ['email', 'phone'],
-            ],
+            'encrypted_fields' => $discoveredModels,
+            'searchable_fields' => $searchableFields,
             'hashing' => [
                 'algorithm' => 'sha256',
                 'salt' => 'laravel-data-encryption',
@@ -231,8 +388,8 @@ class DataEncryptionServiceProvider extends ServiceProvider
                 'key' => '',
                 'index_prefix' => 'encrypted_',
                 'index_settings' => [
-                    'searchableAttributes' => ['name', 'email_parts', 'phone_token'],
-                    'filterableAttributes' => ['email_hash', 'phone_hash'],
+                    'searchableAttributes' => ['email_parts', 'name', 'model_type'],
+                    'filterableAttributes' => ['email_hash', 'phone_hash', 'model_type'],
                     'sortableAttributes' => ['created_at', 'name'],
                     'typoTolerance' => ['enabled' => true],
                 ],
@@ -241,6 +398,16 @@ class DataEncryptionServiceProvider extends ServiceProvider
                 'enabled' => true,
                 'min_part_length' => 3,
                 'email_separators' => ['@', '.', '-', '_', '+'],
+            ],
+            'auto_discover' => true, // Enable auto-discovery of models
+            'sensitive_patterns' => [
+                'email', 'phone', 'mobile', 'telephone',
+                'ssn', 'social_security', 'tax_id',
+                'credit_card', 'card_number',
+                'passport', 'driver_license',
+                'address', 'street', 'city', 'zip', 'postal_code',
+                'dob', 'date_of_birth', 'birth_date',
+                'national_id', 'identity_number'
             ],
         ];
     }
