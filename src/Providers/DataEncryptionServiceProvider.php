@@ -3,182 +3,250 @@
 namespace PalakRajput\DataEncryption\Providers;
 
 use Illuminate\Support\ServiceProvider;
-use Illuminate\Contracts\Support\DeferrableProvider;
 use PalakRajput\DataEncryption\Services\EncryptionService;
 use PalakRajput\DataEncryption\Services\MeilisearchService;
 use PalakRajput\DataEncryption\Services\HashService;
+use Illuminate\Support\Facades\Blade;
+use Illuminate\Contracts\Http\Kernel;
+use PalakRajput\DataEncryption\Http\Middleware\InjectDisableConsole;
 
 class DataEncryptionServiceProvider extends ServiceProvider
 {
     /**
-     * Register any application services.
-     *
-     * @return void
+     * Laravel version detection
      */
-    public function register()
+    private function getLaravelMajorVersion()
     {
-        // Merge package config
-        $this->mergeConfigFrom(
-            __DIR__.'/../../config/data-encryption.php', 
-            'data-encryption'
-        );
-
-        // Register services with version-specific bindings
-        $this->registerServices();
-        
-        // Register facades if they exist
-        $this->registerFacades();
+        $version = app()->version();
+        // Extract major version from string like "Laravel Framework 8.83.27"
+        if (preg_match('/(\d+)\./', $version, $matches)) {
+            return (int) $matches[1];
+        }
+        return 0;
     }
 
     /**
-     * Bootstrap any application services.
-     *
-     * @return void
+     * Check if running Laravel 8 or higher
      */
-    public function boot()
+    private function isLaravel8OrHigher()
     {
-        // Only publish config and migrations in console mode
-        if ($this->app->runningInConsole()) {
-            $this->publishResources();
-            $this->registerCommands();
+        return $this->getLaravelMajorVersion() >= 8;
+    }
+
+    /**
+     * Check if running Laravel 9 or higher
+     */
+    private function isLaravel9OrHigher()
+    {
+        return $this->getLaravelMajorVersion() >= 9;
+    }
+
+    /**
+     * Get appropriate Meilisearch client based on Laravel version
+     */
+    private function getMeilisearchClient()
+    {
+        $host = config('data-encryption.meilisearch.host', 'http://localhost:7700');
+        $key = config('data-encryption.meilisearch.key', '');
+        
+        // Laravel 6-8: Use older client method
+        if ($this->getLaravelMajorVersion() < 9) {
+            // For older Laravel versions, we need to be careful with client instantiation
+            return new \Meilisearch\Client($host, $key);
         }
         
-        // Register Blade directives if Laravel version supports it
-        $this->registerBladeDirectives();
-        
-        // Load migrations
-        $this->loadMigrationsFrom(__DIR__.'/../../database/migrations');
+        // Laravel 9+: Can use newer client
+        return new \Meilisearch\Client($host, $key);
     }
 
-    /**
-     * Register package services.
-     *
-     * @return void
-     */
-    protected function registerServices()
+    public function register()
     {
+        // Ensure config exists before merging
+        $configPath = __DIR__.'/../../config/data-encryption.php';
+        if (file_exists($configPath)) {
+            $this->mergeConfigFrom($configPath, 'data-encryption');
+        } else {
+            // Fallback config for older Laravel versions
+            $this->app['config']->set('data-encryption', $this->getDefaultConfig());
+        }
+
+        // Bind services with version compatibility
         $this->app->singleton(EncryptionService::class, function ($app) {
-            return new EncryptionService($app['config']['data-encryption']);
+            return new EncryptionService($app['config']->get('data-encryption', []));
         });
 
         $this->app->singleton(MeilisearchService::class, function ($app) {
-            return new MeilisearchService($app['config']['data-encryption']);
+            $config = $app['config']->get('data-encryption', []);
+            
+            // Inject compatible Meilisearch client
+            $service = new MeilisearchService($config);
+            
+            // Use reflection to set the client if needed
+            if ($this->getLaravelMajorVersion() < 9) {
+                try {
+                    $reflection = new \ReflectionClass($service);
+                    $clientProperty = $reflection->getProperty('client');
+                    $clientProperty->setAccessible(true);
+                    $clientProperty->setValue($service, $this->getMeilisearchClient());
+                } catch (\Exception $e) {
+                    // Fallback - service will create its own client
+                }
+            }
+            
+            return $service;
         });
 
         $this->app->singleton(HashService::class, function ($app) {
-            return new HashService($app['config']['data-encryption']);
+            return new HashService($app['config']->get('data-encryption', []));
         });
-        
+
         // Alias for easier access
         $this->app->alias(EncryptionService::class, 'encryption.service');
         $this->app->alias(MeilisearchService::class, 'meilisearch.service');
         $this->app->alias(HashService::class, 'hash.service');
     }
 
-    /**
-     * Register facades if they exist.
-     *
-     * @return void
-     */
-    protected function registerFacades()
+    public function boot()
     {
-        // Only register facade if the class exists
-        if (class_exists('PalakRajput\\DataEncryption\\Facades\\DataEncryption')) {
-            $this->app->alias(
-                'PalakRajput\\DataEncryption\\Facades\\DataEncryption',
-                'DataEncryption'
-            );
+        // Middleware registration with version check
+        if (!$this->app->runningInConsole()) {
+            try {
+                $kernel = $this->app->make(Kernel::class);
+                
+                // Check if middleware can be pushed (Laravel 5.1+)
+                if (method_exists($kernel, 'pushMiddleware')) {
+                    $kernel->pushMiddleware(InjectDisableConsole::class);
+                }
+            } catch (\Exception $e) {
+                // Silently fail for older Laravel versions
+            }
         }
-    }
-
-    /**
-     * Publish package resources.
-     *
-     * @return void
-     */
-    protected function publishResources()
-    {
-        // Publish config
+        
+        // Publish config and migrations
         $this->publishes([
             __DIR__.'/../../config/data-encryption.php' => config_path('data-encryption.php'),
-        ], 'data-encryption-config');
+        ], 'config');
 
-        // Publish migrations (with version checking)
+        // Publish migrations with version-aware naming
         $this->publishMigrations();
 
-        // Publish views if they exist
+        // Load views if they exist
         if (file_exists(__DIR__.'/../../resources/views')) {
-            $this->publishes([
-                __DIR__.'/../../resources/views' => resource_path('views/vendor/data-encryption'),
-            ], 'data-encryption-views');
+            $this->loadViewsFrom(__DIR__.'/../../resources/views', 'data-encryption');
         }
+
+        // Blade directive only if Blade facade exists (Laravel 5.0+)
+        if (class_exists('Illuminate\Support\Facades\Blade') && 
+            method_exists('Illuminate\Support\Facades\Blade', 'directive')) {
+            Blade::directive('disableConsole', function () {
+                return "<?php echo view('data-encryption::disable-console')->render(); ?>";
+            });
+        }
+
+        // Register package Artisan commands
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                \PalakRajput\DataEncryption\Console\Commands\InstallEncryptionCommand::class,
+                \PalakRajput\DataEncryption\Console\Commands\EncryptDataCommand::class,
+                \PalakRajput\DataEncryption\Console\Commands\ReindexMeilisearch::class,
+                \PalakRajput\DataEncryption\Console\Commands\DebugSearchCommand::class,
+            ]);
+        }
+
+        // Auto-detect and configure User model based on Laravel version
+        $this->autoConfigureModels();
     }
 
     /**
-     * Publish migrations with version compatibility.
-     *
-     * @return void
+     * Publish migrations with compatibility
      */
-    protected function publishMigrations()
+    private function publishMigrations()
     {
         $migrationsPath = __DIR__.'/../../database/migrations';
         
-        // Check Laravel version to determine migration path
-        $laravelVersion = (int) app()->version();
+        if (!file_exists($migrationsPath)) {
+            return;
+        }
         
-        // Laravel 5.6+ uses different timestamp format than earlier versions
         $timestamp = date('Y_m_d_His');
         
         $this->publishes([
-            // Hash columns migration
-            $migrationsPath . '/add_hash_columns_to_users_table.php.stub' => 
+            // Main migration
+            $migrationsPath . '/add_hash_columns_to_users_table.php' => 
                 database_path("migrations/{$timestamp}_add_hash_columns_to_users_table.php"),
-            
-            // Optional: Domain columns for better search
-            $migrationsPath . '/add_domain_columns_to_users_table.php.stub' =>
-                database_path("migrations/{$timestamp}_add_domain_columns_to_users_table.php"),
-        ], 'data-encryption-migrations');
+        ], 'migrations');
     }
 
     /**
-     * Register package commands.
-     *
-     * @return void
+     * Auto-configure models based on Laravel version
      */
-    protected function registerCommands()
+    private function autoConfigureModels()
     {
-        $this->commands([
-            \PalakRajput\DataEncryption\Console\Commands\InstallEncryptionCommand::class,
-            \PalakRajput\DataEncryption\Console\Commands\EncryptDataCommand::class,
-            \PalakRajput\DataEncryption\Console\Commands\ReindexMeilisearch::class,
-            \PalakRajput\DataEncryption\Console\Commands\DebugSearchCommand::class,
-        ]);
-    }
-
-    /**
-     * Register Blade directives if supported.
-     *
-     * @return void
-     */
-    protected function registerBladeDirectives()
-    {
-        // Check if Blade facade exists (Laravel 5.0+)
-        if (class_exists('Illuminate\Support\Facades\Blade')) {
-            // Safe to use Blade directives
-            \Illuminate\Support\Facades\Blade::directive('encrypted', function ($expression) {
-                return "<?php echo app('encryption.service')->encrypt($expression); ?>";
-            });
-            
-            \Illuminate\Support\Facades\Blade::directive('decrypted', function ($expression) {
-                return "<?php echo app('encryption.service')->decrypt($expression); ?>";
-            });
+        $laravelVersion = $this->getLaravelMajorVersion();
+        
+        // Laravel 8+ uses App\Models\User, older versions use App\User
+        $userModel = $laravelVersion >= 8 ? 'App\Models\User' : 'App\User';
+        
+        // Update config if it exists
+        $config = config('data-encryption', []);
+        
+        if (!isset($config['encrypted_fields'][$userModel])) {
+            config([
+                'data-encryption.encrypted_fields' => [
+                    $userModel => ['email', 'phone']
+                ],
+                'data-encryption.searchable_fields' => [
+                    $userModel => ['email', 'phone']
+                ]
+            ]);
         }
+    }
+
+    /**
+     * Default configuration for older Laravel versions
+     */
+    private function getDefaultConfig()
+    {
+        $laravelVersion = $this->getLaravelMajorVersion();
+        $userModel = $laravelVersion >= 8 ? 'App\Models\User' : 'App\User';
+        
+        return [
+            'encryption' => [
+                'cipher' => 'AES-256-CBC',
+                'key' => env('ENCRYPTION_KEY', env('APP_KEY')),
+            ],
+            'encrypted_fields' => [
+                $userModel => ['email', 'phone'],
+            ],
+            'searchable_fields' => [
+                $userModel => ['email', 'phone'],
+            ],
+            'hashing' => [
+                'algorithm' => 'sha256',
+                'salt' => 'laravel-data-encryption',
+            ],
+            'meilisearch' => [
+                'enabled' => true,
+                'host' => 'http://localhost:7700',
+                'key' => '',
+                'index_prefix' => 'encrypted_',
+                'index_settings' => [
+                    'searchableAttributes' => ['name', 'email_parts', 'phone_token'],
+                    'filterableAttributes' => ['email_hash', 'phone_hash'],
+                    'sortableAttributes' => ['created_at', 'name'],
+                    'typoTolerance' => ['enabled' => true],
+                ],
+            ],
+            'partial_search' => [
+                'enabled' => true,
+                'min_part_length' => 3,
+                'email_separators' => ['@', '.', '-', '_', '+'],
+            ],
+        ];
     }
 
     /**
      * Get the services provided by the provider.
-     *
-     * @return array
      */
     public function provides()
     {
