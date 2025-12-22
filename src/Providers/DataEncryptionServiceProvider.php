@@ -319,22 +319,36 @@ class DataEncryptionServiceProvider extends ServiceProvider
     /**
      * Publish migrations with compatibility
      */
-    private function publishMigrations()
-    {
-        $migrationsPath = __DIR__.'/../../database/migrations';
-        
-        if (!file_exists($migrationsPath)) {
-            return;
+    /**
+ * Publish migrations with compatibility
+ */
+private function publishMigrations()
+{
+    // Correct path to migrations directory
+    $migrationsPath = dirname(__DIR__, 2) . '/database/migrations';
+    
+    if (!file_exists($migrationsPath)) {
+        // Create migrations directory if it doesn't exist
+        if (!mkdir($migrationsPath, 0755, true) && !is_dir($migrationsPath)) {
+            throw new \RuntimeException(sprintf('Directory "%s" was not created', $migrationsPath));
         }
         
-        $timestamp = date('Y_m_d_His');
-        
-        $this->publishes([
-            // Main migration - now creates hash columns for all tables
-            $migrationsPath . '/add_hash_columns_to_all_tables.php' => 
-                database_path("migrations/{$timestamp}_add_hash_columns_to_all_tables.php"),
-        ], 'migrations');
+        // Create the migration file if it doesn't exist
+        $migrationFile = $migrationsPath . '/add_hash_columns_to_all_tables.php';
+        if (!file_exists($migrationFile)) {
+            $stub = file_get_contents(__DIR__ . '/../Stubs/migration.stub');
+            file_put_contents($migrationFile, $stub);
+        }
     }
+    
+    $timestamp = date('Y_m_d_His');
+    
+    $this->publishes([
+        // Main migration - now creates hash columns for all tables
+        $migrationsPath . '/add_hash_columns_to_all_tables.php' => 
+            database_path("migrations/{$timestamp}_add_hash_columns_to_all_tables.php"),
+    ], 'migrations');
+}
 
     /**
      * Default configuration for older Laravel versions
