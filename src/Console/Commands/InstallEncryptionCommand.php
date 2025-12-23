@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
 use App\Models\User;
 use PalakRajput\DataEncryption\Services\MeilisearchService;
+use Illuminate\Support\Str;
 
 class InstallEncryptionCommand extends Command
 {
@@ -17,7 +18,9 @@ class InstallEncryptionCommand extends Command
                             {--yes : Skip all confirmation prompts (use with --auto)}
                             {--models= : Comma-separated list of models to encrypt}
                             {--fields= : Comma-separated list of fields to encrypt}
-                            {--backup : Include backup columns in migration}';
+                            {--backup : Include backup columns in migration}
+                            {--table= : Specific table to encrypt}
+                            {--all-tables : Encrypt all tables with common fields}';
     
     protected $description = 'Install and setup Data Encryption package automatically';
     
@@ -43,7 +46,7 @@ class InstallEncryptionCommand extends Command
             '--force' => true
         ]);
         
-        // Step 2: Create and publish migrations
+        // Step 2: Create and publish migrations for selected tables
         $this->info('📊 Publishing migrations...');
         $this->createAndPublishMigrations();
         
@@ -64,8 +67,8 @@ class InstallEncryptionCommand extends Command
             $this->info('🚀 Running migrations...');
             $this->call('migrate');
             
-            // Step 7: Auto-detect models and encrypt
-            $this->autoSetupModels($skipConfirm);
+            // Step 7: Ask which tables to encrypt
+            $this->setupEncryptionForTables($skipConfirm);
             
             $this->info('✅ Installation COMPLETE! All steps done automatically.');
         } else {
@@ -74,38 +77,295 @@ class InstallEncryptionCommand extends Command
     }
     
     /**
-     * Create migration file if it doesn't exist and publish it
+     * Create migration file for selected tables
      */
     protected function createAndPublishMigrations()
     {
-        // First, ensure the migration exists in the package
-        $this->createMigrationIfMissing();
+        // Get tables to encrypt
+        $tablesToEncrypt = $this->getTablesToEncrypt();
         
-        // Now publish it
+        if (empty($tablesToEncrypt)) {
+            $this->info('ℹ️  No tables selected for encryption. You can add encryption later.');
+            return;
+        }
+        
+        foreach ($tablesToEncrypt as $tableName => $fields) {
+            $this->createMigrationForTable($tableName, $fields);
+        }
+        
+        // Now publish all migrations
         $this->call('vendor:publish', [
             '--provider' => 'PalakRajput\\DataEncryption\\Providers\\DataEncryptionServiceProvider',
             '--tag' => 'migrations',
             '--force' => true
         ]);
         
-        $this->info('✅ Migration published successfully');
+        $this->info('✅ Migrations created for selected tables');
     }
     
     /**
-     * Create migration file in vendor directory if it doesn't exist
+     * Get tables to encrypt from user input
      */
-    protected function createMigrationIfMissing()
+    protected function getTablesToEncrypt()
+    {
+        $tables = [];
+        
+        // Check if specific table is provided
+        $specificTable = $this->option('table');
+        if ($specificTable) {
+            $this->info("📊 Table specified via option: {$specificTable}");
+            $fields = $this->getFieldsForTable($specificTable);
+            if (!empty($fields)) {
+                $tables[$specificTable] = $fields;
+            }
+            return $tables;
+        }
+        
+        // Check if all tables option is set
+        if ($this->option('all-tables')) {
+            return $this->getAllTablesWithCommonFields();
+        }
+        
+        // Interactive mode: Ask user which tables to encrypt
+        if ($this->confirm('Do you want to encrypt specific tables?', true)) {
+            $allTables = $this->getAllTables();
+            
+            if (empty($allTables)) {
+                $this->warn('⚠️  No tables found in the database.');
+                return $tables;
+            }
+            
+            $this->info('📊 Available tables in database:');
+            foreach ($allTables as $index => $table) {
+                $this->line("  " . ($index + 1) . ". {$table}");
+            }
+            
+            while (true) {
+                $tableName = $this->ask('Enter table name to encrypt (or press Enter to finish)');
+                
+                if (empty($tableName)) {
+                    break;
+                }
+                
+                if (!in_array($tableName, $allTables)) {
+                    $this->error("❌ Table '{$tableName}' not found in database.");
+                    if ($this->confirm('Show available tables again?')) {
+                        $this->info('📊 Available tables: ' . implode(', ', $allTables));
+                    }
+                    continue;
+                }
+                
+                $fields = $this->getFieldsForTable($tableName);
+                if (empty($fields)) {
+                    $this->warn("⚠️  No encryptable fields found in table '{$tableName}'");
+                    continue;
+                }
+                
+                $this->info("📝 Fields in '{$tableName}': " . implode(', ', $fields));
+                
+                if ($this->confirm("Encrypt all fields in '{$tableName}'?", true)) {
+                    $selectedFields = $fields;
+                } else {
+                    $selectedFields = $this->selectFields($tableName, $fields);
+                }
+                
+                if (!empty($selectedFields)) {
+                    $tables[$tableName] = $selectedFields;
+                    $this->info("✅ Added '{$tableName}' with fields: " . implode(', ', $selectedFields));
+                }
+            }
+        }
+        
+        return $tables;
+    }
+    
+    /**
+     * Get all tables from database
+     */
+    protected function getAllTables()
+    {
+        try {
+            $connection = DB::connection();
+            $databaseName = $connection->getDatabaseName();
+            
+            // Different SQL for different database drivers
+            $driver = $connection->getDriverName();
+            
+            switch ($driver) {
+                case 'mysql':
+                    $tables = DB::select('SHOW TABLES');
+                    $tableField = 'Tables_in_' . $databaseName;
+                    return array_map(function($table) use ($tableField) {
+                        return $table->$tableField;
+                    }, $tables);
+                    
+                case 'pgsql':
+                    $tables = DB::select("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public'");
+                    return array_map(function($table) {
+                        return $table->tablename;
+                    }, $tables);
+                    
+                case 'sqlite':
+                    $tables = DB::select("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
+                    return array_map(function($table) {
+                        return $table->name;
+                    }, $tables);
+                    
+                case 'sqlsrv':
+                    $tables = DB::select("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'");
+                    return array_map(function($table) {
+                        return $table->TABLE_NAME;
+                    }, $tables);
+                    
+                default:
+                    $this->warn("⚠️  Unsupported database driver: {$driver}");
+                    return [];
+            }
+        } catch (\Exception $e) {
+            $this->error("❌ Error fetching tables: " . $e->getMessage());
+            return [];
+        }
+    }
+    
+    /**
+     * Get encryptable fields for a table
+     */
+    protected function getFieldsForTable($tableName)
+    {
+        try {
+            $columns = Schema::getColumnListing($tableName);
+            
+            // Filter for columns that might contain sensitive data
+            $sensitiveFieldPatterns = [
+                'email', 'phone', 'ssn', 'password', 'token', 'secret',
+                'address', 'birth', 'credit', 'card', 'pin', 'passport',
+                'tax', 'national_id', 'driver_license', 'medical',
+                'bank', 'account', 'salary', 'income', 'social_security'
+            ];
+            
+            $encryptableFields = [];
+            foreach ($columns as $column) {
+                $columnLower = strtolower($column);
+                
+                // Skip certain columns
+                if (in_array($columnLower, ['id', 'created_at', 'updated_at', 'deleted_at', 'remember_token'])) {
+                    continue;
+                }
+                
+                // Check if column contains sensitive data
+                foreach ($sensitiveFieldPatterns as $pattern) {
+                    if (str_contains($columnLower, $pattern)) {
+                        // Check if it's a string/text column
+                        $columnType = Schema::getColumnType($tableName, $column);
+                        if (in_array($columnType, ['string', 'text', 'varchar', 'char', 'mediumtext', 'longtext'])) {
+                            $encryptableFields[] = $column;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            return array_unique($encryptableFields);
+        } catch (\Exception $e) {
+            $this->error("❌ Error fetching columns for table '{$tableName}': " . $e->getMessage());
+            return [];
+        }
+    }
+    
+    /**
+     * Let user select specific fields from a table
+     */
+    protected function selectFields($tableName, $availableFields)
+    {
+        $this->info("📝 Select fields to encrypt in '{$tableName}':");
+        
+        $choices = [];
+        foreach ($availableFields as $field) {
+            $choices[$field] = $field;
+        }
+        
+        $selected = $this->choice(
+            'Choose fields (comma-separated, or "all" for all fields):',
+            array_merge(['all'], array_values($choices)),
+            0,
+            null,
+            true
+        );
+        
+        if (in_array('all', $selected)) {
+            return $availableFields;
+        }
+        
+        return $selected;
+    }
+    
+    /**
+     * Get all tables with common sensitive fields
+     */
+    protected function getAllTablesWithCommonFields()
+    {
+        $allTables = $this->getAllTables();
+        $tables = [];
+        
+        $this->info('🔍 Scanning all tables for sensitive fields...');
+        
+        foreach ($allTables as $table) {
+            $fields = $this->getFieldsForTable($table);
+            if (!empty($fields)) {
+                $tables[$table] = $fields;
+                $this->line("  📋 {$table}: " . implode(', ', $fields));
+            }
+        }
+        
+        if (empty($tables)) {
+            $this->warn('⚠️  No tables with sensitive fields found.');
+            return [];
+        }
+        
+        if ($this->confirm('Encrypt all detected tables?', true)) {
+            return $tables;
+        }
+        
+        // Let user select from detected tables
+        $this->info('📋 Detected tables with sensitive fields:');
+        $tableChoices = [];
+        foreach ($tables as $table => $fields) {
+            $tableChoices[] = $table;
+            $this->line("  • {$table} (" . implode(', ', $fields) . ")");
+        }
+        
+        $selectedTables = $this->choice(
+            'Select tables to encrypt (comma-separated):',
+            $tableChoices,
+            null,
+            null,
+            true
+        );
+        
+        $result = [];
+        foreach ($selectedTables as $table) {
+            if (isset($tables[$table])) {
+                $result[$table] = $tables[$table];
+            }
+        }
+        
+        return $result;
+    }
+    
+    /**
+     * Create migration for a specific table
+     */
+    protected function createMigrationForTable($tableName, $fields)
     {
         $vendorDir = base_path('vendor/palak-rajput/laravel-data-encryption');
         
         // Check if package is installed via composer
         if (!File::exists($vendorDir)) {
-            // Try to find it in a different location
             $vendorDir = base_path('vendor/palak-rajput/laravel-data-encryption');
             
             if (!File::exists($vendorDir)) {
-                $this->warn('⚠️  Package not found in vendor directory. Using direct migration creation.');
-                $this->createMigrationDirectly();
+                // Create migration directly in project
+                $this->createMigrationDirectly($tableName, $fields);
                 return;
             }
         }
@@ -116,33 +376,33 @@ class InstallEncryptionCommand extends Command
             File::makeDirectory($migrationsDir, 0755, true);
         }
         
-        $migrationFile = $migrationsDir . '/add_hash_columns_to_users_table.php';
+        $safeTableName = Str::snake($tableName);
+        $migrationFile = $migrationsDir . "/add_hash_columns_to_{$safeTableName}_table.php";
         
-        if (!File::exists($migrationFile)) {
-            $this->createMigrationFile($migrationFile);
-            $this->info('✅ Created missing migration file in package');
-        }
+        $this->createMigrationFileContent($migrationFile, $tableName, $fields);
+        $this->info("✅ Created migration for table '{$tableName}'");
     }
     
     /**
-     * Create migration file directly in the project if package not found
+     * Create migration directly in project
      */
-    protected function createMigrationDirectly()
+    protected function createMigrationDirectly($tableName, $fields)
     {
         $timestamp = date('Y_m_d_His');
-        $migrationFile = database_path("migrations/{$timestamp}_add_hash_columns_to_users_table.php");
+        $safeTableName = Str::snake($tableName);
+        $migrationFile = database_path("migrations/{$timestamp}_add_hash_columns_to_{$safeTableName}_table.php");
         
-        if (!File::exists($migrationFile)) {
-            $this->createMigrationFile($migrationFile);
-            $this->info('✅ Created migration file directly in project');
-        }
+        $this->createMigrationFileContent($migrationFile, $tableName, $fields);
+        $this->info("✅ Created migration for table '{$tableName}' directly in project");
     }
     
     /**
-     * Create the migration file content
+     * Create migration file content
      */
-    protected function createMigrationFile($filePath)
+    protected function createMigrationFileContent($filePath, $tableName, $fields)
     {
+        $backupOption = $this->option('backup') ? 'true' : 'false';
+        
         $content = '<?php
 
 use Illuminate\Database\Migrations\Migration;
@@ -153,43 +413,47 @@ return new class extends Migration
 {
     public function up()
     {
-        Schema::table(\'users\', function (Blueprint $table) {
-            // Add hash columns for encrypted fields
-            $columns = [\'email\', \'phone\'];
-            
-            foreach ($columns as $column) {
-                if (Schema::hasColumn(\'users\', $column)) {
-                    // Add hash column for searching
-                    $table->string($column . \'_hash\', 64)
+        Schema::table(\'' . $tableName . '\', function (Blueprint $table) {
+            // Add hash columns for encrypted fields';
+        
+        foreach ($fields as $field) {
+            $content .= '
+            if (Schema::hasColumn(\'' . $tableName . '\', \'' . $field . '\')) {
+                // Add hash column for searching
+                $table->string(\'' . $field . '_hash\', 64)
+                       ->nullable()
+                       ->index()
+                       ->after(\'' . $field . '\');
+                
+                // Add backup column if requested
+                if (' . $backupOption . ' || config(\'data-encryption.migration.backup_columns\', false)) {
+                    $table->string(\'' . $field . '_backup\', 255)
                            ->nullable()
-                           ->index()
-                           ->after($column);
-                    
-                    // Add backup column if requested
-                    if (config(\'data-encryption.migration.backup_columns\', false)) {
-                        $table->string($column . \'_backup\', 255)
-                               ->nullable()
-                               ->after($column . \'_hash\');
-                    }
+                           ->after(\'' . $field . '_hash\');
                 }
-            }
+            }';
+        }
+        
+        $content .= '
         });
     }
 
     public function down()
     {
-        Schema::table(\'users\', function (Blueprint $table) {
-            $columns = [\'email\', \'phone\'];
-            
-            foreach ($columns as $column) {
-                if (Schema::hasColumn(\'users\', $column . \'_hash\')) {
-                    $table->dropColumn($column . \'_hash\');
-                }
-                
-                if (Schema::hasColumn(\'users\', $column . \'_backup\')) {
-                    $table->dropColumn($column . \'_backup\');
-                }
+        Schema::table(\'' . $tableName . '\', function (Blueprint $table) {';
+        
+        foreach ($fields as $field) {
+            $content .= '
+            if (Schema::hasColumn(\'' . $tableName . '\', \'' . $field . '_hash\')) {
+                $table->dropColumn(\'' . $field . '_hash\');
             }
+            
+            if (Schema::hasColumn(\'' . $tableName . '\', \'' . $field . '_backup\')) {
+                $table->dropColumn(\'' . $field . '_backup\');
+            }';
+        }
+        
+        $content .= '
         });
     }
 };';
@@ -197,120 +461,227 @@ return new class extends Migration
         File::put($filePath, $content);
     }
     
-    protected function autoSetupModels($skipConfirm = false)
+    /**
+     * Setup encryption for selected tables
+     */
+    protected function setupEncryptionForTables($skipConfirm = false)
     {
-        $this->info('🤖 Auto-configuring models...');
-
-        if (!class_exists('App\Models\User')) {
-            $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
+        // Get the tables that were selected for migration creation
+        $tablesToEncrypt = $this->getTablesToEncrypt();
+        
+        if (empty($tablesToEncrypt)) {
+            $this->info('ℹ️  No tables selected for encryption setup.');
             return;
         }
-
-        // 1️⃣ Ensure trait & properties exist
-        $this->setupUserModel();
-
-        if (!($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true)))) {
-            return;
+        
+        $this->info('🤖 Setting up encryption for selected tables...');
+        
+        foreach ($tablesToEncrypt as $tableName => $fields) {
+            $this->setupTableEncryption($tableName, $fields, $skipConfirm);
         }
-
-        $backup = $this->option('backup') ? true : false;
-
-        /*
-        |--------------------------------------------------------------------------
-        | STEP 1: Initialize Meilisearch index FIRST
-        |--------------------------------------------------------------------------
-        */
-        $this->info('🔧 Initializing Meilisearch index...');
-
-        $meilisearch = app(\PalakRajput\DataEncryption\Services\MeilisearchService::class);
-        $model       = new \App\Models\User();
-        $indexName   = $model->getMeilisearchIndexName();
-
-        if (!$meilisearch->initializeIndex($indexName)) {
-            $this->error("❌ Failed to initialize Meilisearch index: {$indexName}");
-            return;
-        }
-
-        $this->info("✅ Meilisearch index '{$indexName}' initialized");
-
-        /*
-        |--------------------------------------------------------------------------
-        | STEP 2: Encrypt existing data
-        |--------------------------------------------------------------------------
-        */
-        $this->info('🔐 Encrypting User data...');
-
-        $this->call('data-encryption:encrypt', [
-            '--model'  => 'App\Models\User',
-            '--backup' => $backup,
-            '--chunk'  => 1000,
-            '--force'  => true,
-        ]);
-
-        /*
-        |--------------------------------------------------------------------------
-        | STEP 3: Reindex encrypted data
-        |--------------------------------------------------------------------------
-        */
-        $this->info('🔍 Reindexing encrypted data to Meilisearch...');
-
-        $this->call('data-encryption:reindex', [
-            '--model' => 'App\Models\User',
-            '--force' => true,
-        ]);
-
-        /*
-        |--------------------------------------------------------------------------
-        | DONE
-        |--------------------------------------------------------------------------
-        */
-        $this->info('✅ Setup complete! Partial search is now enabled.');
-        $this->info('💡 Try searching for: gmail, user, @example.com');
     }
     
-    protected function setupUserModel()
+    /**
+     * Setup encryption for a specific table
+     */
+    protected function setupTableEncryption($tableName, $fields, $skipConfirm = false)
     {
-        $userModelPath = app_path('Models/User.php');
-
-        if (!File::exists($userModelPath)) {
-            $this->warn('⚠️  User model not found at: ' . $userModelPath);
-            return;
+        $this->info("\n📊 Setting up encryption for table: {$tableName}");
+        
+        // Check if model exists for this table
+        $modelClass = $this->getModelClassForTable($tableName);
+        
+        if ($modelClass && class_exists($modelClass)) {
+            $this->info("✅ Model found: {$modelClass}");
+            $this->setupModelForEncryption($modelClass, $fields);
+            
+            // Ask if we should encrypt existing data
+            if ($skipConfirm || $this->confirm("Encrypt existing data in '{$tableName}' now?", true)) {
+                $this->encryptTableData($tableName, $modelClass, $fields);
+            }
+        } else {
+            $this->warn("⚠️  No model found for table '{$tableName}'. Creating a basic model...");
+            
+            if ($this->confirm("Create a basic model for '{$tableName}'?", true)) {
+                $modelClass = $this->createBasicModel($tableName, $fields);
+                $this->setupModelForEncryption($modelClass, $fields);
+                
+                if ($skipConfirm || $this->confirm("Encrypt existing data in '{$tableName}' now?", true)) {
+                    $this->encryptTableData($tableName, $modelClass, $fields);
+                }
+            } else {
+                $this->info("ℹ️  You'll need to manually encrypt data for table '{$tableName}' using the command:");
+                $this->line("   php artisan data-encryption:encrypt-table {$tableName} --fields=" . implode(',', $fields));
+            }
         }
-
-        $content = File::get($userModelPath);
-
-        // Add trait import if missing
-        if (!str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;')) {
-            $content = preg_replace(
-                '/^(namespace App\\\\Models;)/m',
-                "$1\n\nuse PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;",
-                $content
-            );
+    }
+    
+    /**
+     * Get model class for table
+     */
+    protected function getModelClassForTable($tableName)
+    {
+        // Try common model names
+        $modelName = Str::studly(Str::singular($tableName));
+        
+        // Check in different namespaces
+        $possibleClasses = [
+            'App\\Models\\' . $modelName,
+            'App\\' . $modelName,
+            'App\\Models\\' . Str::studly($tableName),
+            'App\\' . Str::studly($tableName),
+        ];
+        
+        foreach ($possibleClasses as $class) {
+            if (class_exists($class)) {
+                return $class;
+            }
         }
-
-        // Add trait inside class if missing
-        if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
-            $content = preg_replace(
-                '/(class User extends [^{]+\{)/',
-                "$1\n    use HasEncryptedFields;",
-                $content
-            );
+        
+        return null;
+    }
+    
+    /**
+     * Setup model for encryption by adding trait and properties
+     */
+    protected function setupModelForEncryption($modelClass, $fields)
+    {
+        try {
+            $reflection = new \ReflectionClass($modelClass);
+            $modelPath = $reflection->getFileName();
+            
+            if (!File::exists($modelPath)) {
+                $this->error("❌ Model file not found: {$modelPath}");
+                return false;
+            }
+            
+            $content = File::get($modelPath);
+            
+            // Add trait import if missing
+            if (!str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;')) {
+                $content = preg_replace(
+                    '/^(namespace\s+[^;]+;)/m',
+                    "$1\n\nuse PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;",
+                    $content
+                );
+            }
+            
+            // Add trait inside class if missing
+            if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
+                $content = preg_replace(
+                    '/(class\s+\w+\s+extends\s+[^{]+\{)/',
+                    "$1\n    use HasEncryptedFields;",
+                    $content
+                );
+            }
+            
+            // Add encrypted fields properties
+            $fieldsString = "['" . implode("', '", $fields) . "']";
+            
+            if (!str_contains($content, 'protected static $encryptedFields')) {
+                $content = preg_replace(
+                    '/(class\s+\w+\s+extends\s+[^{]+\{)/',
+                    "$1\n    protected static \$encryptedFields = {$fieldsString};\n    protected static \$searchableHashFields = {$fieldsString};",
+                    $content
+                );
+            }
+            
+            File::put($modelPath, $content);
+            $this->info("✅ Updated {$modelClass} with encryption properties");
+            return true;
+            
+        } catch (\Exception $e) {
+            $this->error("❌ Error setting up model {$modelClass}: " . $e->getMessage());
+            return false;
         }
-
-        // Add encrypted fields properties if missing
-        if (!str_contains($content, 'protected static $encryptedFields') &&
-            !str_contains($content, 'protected static $searchableHashFields')) {
-
-            $content = preg_replace(
-                '/(class User extends [^{]+\{)/',
-                "$1\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];",
-                $content,
-                1
-            );
+    }
+    
+    /**
+     * Create a basic model for a table
+     */
+    protected function createBasicModel($tableName, $fields)
+    {
+        $modelName = Str::studly(Str::singular($tableName));
+        $modelPath = app_path("Models/{$modelName}.php");
+        
+        if (File::exists($modelPath)) {
+            $this->info("ℹ️  Model already exists at: {$modelPath}");
+            return "App\\Models\\{$modelName}";
         }
+        
+        $fieldsString = "['" . implode("', '", $fields) . "']";
+        
+        $content = '<?php
 
-        File::put($userModelPath, $content);
-        $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+use PalakRajput\DataEncryption\Models\Trait\HasEncryptedFields;
+
+class ' . $modelName . ' extends Model
+{
+    use HasEncryptedFields;
+    
+    protected $table = \'' . $tableName . '\';
+    
+    protected $fillable = [
+        // Add fillable fields here
+    ];
+    
+    protected static $encryptedFields = ' . $fieldsString . ';
+    protected static $searchableHashFields = ' . $fieldsString . ';
+}';
+        
+        File::put($modelPath, $content);
+        $this->info("✅ Created basic model at: {$modelPath}");
+        
+        return "App\\Models\\{$modelName}";
+    }
+    
+    /**
+     * Encrypt data in a table
+     */
+    protected function encryptTableData($tableName, $modelClass, $fields)
+    {
+        $backup = $this->option('backup') ? true : false;
+        
+        $this->info("🔐 Encrypting data in '{$tableName}'...");
+        
+        try {
+            // Initialize Meilisearch index if enabled
+            if (config('data-encryption.meilisearch.enabled', true)) {
+                $this->info("🔧 Initializing Meilisearch index for '{$tableName}'...");
+                $meilisearch = app(MeilisearchService::class);
+                $model = new $modelClass();
+                $indexName = $model->getMeilisearchIndexName();
+                
+                if ($meilisearch->initializeIndex($indexName)) {
+                    $this->info("✅ Meilisearch index '{$indexName}' initialized");
+                }
+            }
+            
+            // Encrypt the data
+            $this->call('data-encryption:encrypt', [
+                '--model'  => $modelClass,
+                '--backup' => $backup,
+                '--chunk'  => 1000,
+                '--force'  => true,
+            ]);
+            
+            // Reindex to Meilisearch
+            if (config('data-encryption.meilisearch.enabled', true)) {
+                $this->info("🔍 Reindexing encrypted data to Meilisearch...");
+                $this->call('data-encryption:reindex', [
+                    '--model' => $modelClass,
+                    '--force' => true,
+                ]);
+            }
+            
+            $this->info("✅ Successfully encrypted '{$tableName}' table");
+            
+        } catch (\Exception $e) {
+            $this->error("❌ Error encrypting '{$tableName}': " . $e->getMessage());
+        }
     }
     
     protected function addEnvironmentVariables()
@@ -463,34 +834,14 @@ return new class extends Migration
         if ($this->confirm('Run migrations now?', true)) {
             $this->call('migrate');
             
-            if ($this->confirm('Add HasEncryptedFields trait to User model automatically?', true)) {
-                $this->setupUserModel();
-                
-                if ($this->confirm('Encrypt existing User data now?', false)) {
-                    $backup = $this->option('backup') ? true : false;
-                    
-                    $this->call('data-encryption:encrypt', [
-                        'model' => 'App\Models\User',
-                        '--backup' => $backup,
-                        '--chunk' => 1000,
-                    ]);
-                    
-                    $this->info('✅ All steps completed!');
-                    return;
-                }
+            if ($this->confirm('Setup encryption for tables now?', true)) {
+                $this->setupEncryptionForTables(false);
             }
         }
         
         $this->newLine();
-        $this->info('Manual steps if skipped:');
-        $this->line('1. Run migrations: php artisan migrate');
-        $this->line('2. Add trait to User.php:');
-        $this->line('   use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
-        $this->line('   protected static $encryptedFields = [\'email\', \'phone\'];');
-        $this->line('   protected static $searchableHashFields = [\'email\', \'phone\'];');
-        $this->line('3. Encrypt data: php artisan data-encryption:encrypt "App\Models\User" --backup');
-        $this->newLine();
-        
         $this->info('💡 For automatic setup, run: php artisan data-encryption:install --auto');
+        $this->info('💡 To encrypt a specific table: php artisan data-encryption:install --table=table_name');
+        $this->info('💡 To encrypt all tables: php artisan data-encryption:install --all-tables');
     }
 }
