@@ -9,7 +9,6 @@ use PalakRajput\DataEncryption\Services\EncryptionService;
 use PalakRajput\DataEncryption\Services\MeilisearchService;
 use PalakRajput\DataEncryption\Services\HashService;
 use Illuminate\Support\Facades\File;
-use ReflectionClass;
 
 class EncryptDataCommand extends Command
 {
@@ -18,11 +17,9 @@ class EncryptDataCommand extends Command
                         {--backup : Create backup before encryption}
                         {--field= : Specific field to encrypt}
                         {--chunk=1000 : Number of records to process at once}
-                        {--force : Skip confirmation prompts}
-                        {--fields= : Comma-separated list of fields to encrypt (default: email,phone)}
-                        {--searchable= : Comma-separated list of fields for searchable hashes}';
+                        {--force : Skip confirmation prompts}';
     
-    protected $description = 'Encrypt existing data in the database and automatically setup model';
+    protected $description = 'Encrypt existing data in the database';
     
     public function handle()
     {
@@ -44,49 +41,8 @@ class EncryptDataCommand extends Command
         // Check if model exists
         if (!class_exists($modelClass)) {
             $this->error("Model {$modelClass} not found");
-            
-            // Try to create the model file
-            if ($this->confirm('Model file not found. Would you like to create it?', false)) {
-                $modelPath = $this->createModelFile($modelClass);
-                if (!$modelPath) {
-                    return;
-                }
-            } else {
-                return;
-            }
-        }
-        
-        // Auto-add HasEncryptedFields trait if not present
-        $modelUpdated = $this->addHasEncryptedFieldsTrait($modelClass);
-        
-        if (!$modelUpdated) {
-            $this->error("Failed to add HasEncryptedFields trait to model {$modelClass}");
             return;
         }
-        
-        // Get fields to encrypt (from option or ask)
-        $fieldsInput = $this->option('fields');
-        if ($fieldsInput) {
-            $fields = explode(',', $fieldsInput);
-        } else {
-            // Ask for fields if not provided
-            $fields = $this->askForFields($modelClass);
-            if (empty($fields)) {
-                $this->error('No fields specified for encryption.');
-                return;
-            }
-        }
-        
-        // Get searchable fields
-        $searchableInput = $this->option('searchable');
-        if ($searchableInput) {
-            $searchableFields = explode(',', $searchableInput);
-        } else {
-            $searchableFields = $fields; // Default to all fields
-        }
-        
-        // Update model with fields configuration
-        $this->updateModelWithFields($modelClass, $fields, $searchableFields);
         
         // Check if model uses HasEncryptedFields trait
         $model = new $modelClass;
@@ -95,47 +51,39 @@ class EncryptDataCommand extends Command
         
         if (!in_array($traitName, $traits)) {
             $this->error("Model {$modelClass} does not use HasEncryptedFields trait");
-            $this->line("Trying to add it automatically...");
-            
-            // Try to add trait again
-            if (!$this->addHasEncryptedFieldsTrait($modelClass)) {
-                $this->error("Failed to add HasEncryptedFields trait");
-                $this->line("Add this to your model manually:");
-                $this->line("use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;");
-                $this->line("protected static \$encryptedFields = ['email', 'phone'];");
-                $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
+            $this->line("Add this to your model:");
+            $this->line("use PalakRajput\DataEncryption\Models\Trait\HasEncryptedFields;");
+            $this->line("protected static \$encryptedFields = ['email', 'phone'];");
+            $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
+            return;
+        }
+        
+        if ($this->option('backup')) {
+            $this->createBackup();
+        }
+        
+        // Check confirmation if not forced
+        if (!$this->option('force')) {
+            $this->warn('⚠️  This will encrypt data IN-PLACE in your database!');
+            $this->warn('   Make sure you have a backup!');
+            if (!$this->confirm('Are you sure you want to continue?', false)) {
+                $this->info('Encryption cancelled.');
                 return;
             }
         }
         
         // Get encrypted fields from model's static property
-        $reflection = new ReflectionClass($modelClass);
-        
-        // Check if encryptedFields property exists
-        if (!$reflection->hasProperty('encryptedFields')) {
-            $this->error("Model {$modelClass} doesn't have encryptedFields property configured");
-            $this->line("Adding it now...");
-            $this->updateModelWithFields($modelClass, $fields, $searchableFields);
-        }
-        
+        $reflection = new \ReflectionClass($modelClass);
         $encryptedFields = $reflection->getStaticPropertyValue('encryptedFields');
-        
+
         if (empty($encryptedFields)) {
             $this->error("Model {$modelClass} doesn't have encryptedFields property configured");
-            $this->line("Adding default fields...");
-            $this->updateModelWithFields($modelClass, $fields, $searchableFields);
-            $encryptedFields = $fields;
+            $this->line("Add this to your model:");
+            $this->line("protected static \$encryptedFields = ['email', 'phone'];");
+            return;
         }
 
         $fields = $encryptedFields;
-        
-        // Create migration for hash columns if they don't exist
-        $migrationCreated = $this->createMigrationIfNeeded($modelClass, $fields);
-        
-        if ($migrationCreated) {
-            $this->info('🚀 Running migration to add hash columns...');
-            $this->call('migrate');
-        }
         
         // Check if we have the fields in database
         $table = $model->getTable();
@@ -148,23 +96,7 @@ class EncryptDataCommand extends Command
         
         if (empty($fields)) {
             $this->warn("⚠️  No fields to encrypt in {$modelClass}");
-            $this->line("Available columns: " . implode(', ', $existingColumns));
             return;
-        }
-        
-        if ($this->option('backup')) {
-            $this->createBackup($modelClass);
-        }
-        
-        // Check confirmation if not forced
-        if (!$this->option('force')) {
-            $this->warn('⚠️  This will encrypt data IN-PLACE in your database!');
-            $this->warn('   Make sure you have a backup!');
-            $this->info("Fields to encrypt: " . implode(', ', $fields));
-            if (!$this->confirm('Are you sure you want to continue?', false)) {
-                $this->info('Encryption cancelled.');
-                return;
-            }
         }
         
         $this->info("Encrypting fields for {$modelClass}: " . implode(', ', $fields));
@@ -193,470 +125,31 @@ class EncryptDataCommand extends Command
                 $this->error("❌ Failed to configure Meilisearch index");
             }
         }
-        
-        $this->info("\n✅ Model {$modelClass} has been successfully configured with:");
-        $this->line("   - HasEncryptedFields trait");
-        $this->line("   - encryptedFields: " . implode(', ', $fields));
-        $this->line("   - searchableHashFields: " . implode(', ', $searchableFields));
     }
     
-    /**
-     * Add HasEncryptedFields trait to model
-     */
-  /**
- * Add HasEncryptedFields trait to model
- */
-protected function addHasEncryptedFieldsTrait($modelClass): bool
-{
-    $modelPath = $this->getModelPath($modelClass);
-    
-    if (!$modelPath || !File::exists($modelPath)) {
-        $this->error("Could not find model file for: {$modelClass}");
-        return false;
-    }
-    
-    $content = File::get($modelPath);
-    $modelName = class_basename($modelClass);
-    
-    $originalContent = $content;
-    $changesMade = false;
-    
-    // 1. Add trait import if missing
-    $traitImport = 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;';
-    if (!str_contains($content, 'PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields')) {
-        // Find the right place to add the import (after namespace but before class)
-        $lines = explode("\n", $content);
-        $newLines = [];
-        $importAdded = false;
-        
-        foreach ($lines as $line) {
-            $newLines[] = $line;
-            
-            // Add import after the namespace or after last use statement
-            if (!$importAdded && (
-                str_contains($line, 'namespace ') || 
-                (str_contains($line, 'use ') && !str_contains($line, 'use PalakRajput\\DataEncryption'))
-            )) {
-                // Check if next line is also a use statement or empty line
-                $nextLine = next($lines) ?: '';
-                if (!str_contains($nextLine, 'use ') && !str_contains($nextLine, 'class ')) {
-                    $newLines[] = $traitImport;
-                    $importAdded = true;
-                    $changesMade = true;
-                }
-            }
-        }
-        
-        if (!$importAdded) {
-            // If we couldn't find a good place, add it before the class
-            $content = preg_replace(
-                '/(class\s+' . preg_quote($modelName) . '\s+.*\{)/',
-                $traitImport . "\n\n$1",
-                $content
-            );
-            $changesMade = true;
-        } else {
-            $content = implode("\n", $newLines);
-        }
-        
-        if ($changesMade) {
-            $this->info("✅ Added trait import to {$modelName}");
-        }
-    }
-    
-    // 2. Add trait inside class if missing
-    if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
-        // Find class opening brace and add trait after it
-        $pattern = '/(class\s+' . preg_quote($modelName) . '\s+.*\n?\s*\{)/';
-        if (preg_match($pattern, $content, $matches)) {
-            // Get the class opening line
-            $classOpening = $matches[1];
-            
-            // Add trait after the opening brace
-            $replacement = $classOpening . "\n    use HasEncryptedFields;";
-            $content = preg_replace($pattern, $replacement, $content, 1);
-            
-            $changesMade = true;
-            $this->info("✅ Added HasEncryptedFields trait to {$modelName} class");
-        } else {
-            // Try alternative pattern
-            $pattern = '/(class ' . preg_quote($modelName) . '.*\{)/';
-            $content = preg_replace(
-                $pattern,
-                "$1\n    use HasEncryptedFields;",
-                $content
-            );
-            $changesMade = true;
-            $this->info("✅ Added HasEncryptedFields trait to {$modelName} class");
-        }
-    }
-    
-    // 3. Add encryptedFields property if missing
-    if (!str_contains($content, 'protected static $encryptedFields')) {
-        // Find where to add it (after the trait or at beginning of class)
-        if (preg_match('/(use HasEncryptedFields;\s*)/', $content, $matches)) {
-            // Add after the trait
-            $replacement = $matches[1] . "\n    protected static \$encryptedFields = ['email', 'phone'];";
-            $content = preg_replace('/(use HasEncryptedFields;\s*)/', $replacement, $content, 1);
-        } else {
-            // Add at beginning of class after opening brace
-            $pattern = '/(class\s+' . preg_quote($modelName) . '\s+.*\n?\s*\{)/';
-            if (preg_match($pattern, $content, $matches)) {
-                $replacement = $matches[1] . "\n    use HasEncryptedFields;\n    protected static \$encryptedFields = ['email', 'phone'];";
-                $content = preg_replace($pattern, $replacement, $content, 1);
-            }
-        }
-        $changesMade = true;
-        $this->info("✅ Added encryptedFields property to {$modelName}");
-    }
-    
-    // 4. Add searchableHashFields property if missing
-    if (!str_contains($content, 'protected static $searchableHashFields')) {
-        // Add it after encryptedFields property
-        $pattern = '/(protected static \$encryptedFields\s*=\s*\[.*?\];\s*)/s';
-        if (preg_match($pattern, $content, $matches)) {
-            $replacement = $matches[1] . "    protected static \$searchableHashFields = ['email', 'phone'];\n";
-            $content = preg_replace($pattern, $replacement, $content, 1);
-        } else {
-            // If pattern not found, add it after encryptedFields with any value
-            $pattern = '/(protected static \$encryptedFields.*?;\s*)/s';
-            if (preg_match($pattern, $content, $matches)) {
-                $replacement = $matches[1] . "    protected static \$searchableHashFields = ['email', 'phone'];\n";
-                $content = preg_replace($pattern, $replacement, $content, 1);
-            }
-        }
-        $changesMade = true;
-        $this->info("✅ Added searchableHashFields property to {$modelName}");
-    }
-    
-    if ($changesMade && $content !== $originalContent) {
-        File::put($modelPath, $content);
-        $this->info("✅ Successfully updated {$modelName} model");
-        
-        // Show what was added
-        $this->line("\n📄 Model {$modelName} now contains:");
-        $this->line("   - use PalakRajput\DataEncryption\Models\Trait\HasEncryptedFields;");
-        $this->line("   - use HasEncryptedFields; (inside class)");
-        $this->line("   - protected static \$encryptedFields = ['email', 'phone'];");
-        $this->line("   - protected static \$searchableHashFields = ['email', 'phone'];");
-        
-        return true;
-    }
-    
-    return true; // Return true even if no changes were needed
-}
-    
-    /**
-     * Update model with fields configuration
-     */
-   /**
- * Update model with fields configuration
- */
-protected function updateModelWithFields($modelClass, $fields, $searchableFields): bool
-{
-    $modelPath = $this->getModelPath($modelClass);
-    
-    if (!$modelPath || !File::exists($modelPath)) {
-        $this->error("Could not find model file for: {$modelClass}");
-        return false;
-    }
-    
-    $content = File::get($modelPath);
-    $modelName = class_basename($modelClass);
-    
-    $fieldsStr = var_export($fields, true);
-    $searchableStr = var_export($searchableFields, true);
-    
-    $changesMade = false;
-    
-    // Update encryptedFields property
-    if (str_contains($content, 'protected static $encryptedFields')) {
-        $pattern = '/(protected static \$encryptedFields\s*=\s*)(\[.*?\])(\s*;)/s';
-        if (preg_match($pattern, $content)) {
-            $newContent = preg_replace($pattern, '$1' . $fieldsStr . '$3', $content);
-            if ($newContent !== $content) {
-                $content = $newContent;
-                $changesMade = true;
-                $this->info("✅ Updated encryptedFields for {$modelName}");
-            }
-        }
-    } else {
-        // Add encryptedFields property if missing
-        if (preg_match('/(use HasEncryptedFields;\s*)/', $content, $matches)) {
-            $replacement = $matches[1] . "\n    protected static \$encryptedFields = {$fieldsStr};";
-            $content = preg_replace('/(use HasEncryptedFields;\s*)/', $replacement, $content, 1);
-            $changesMade = true;
-            $this->info("✅ Added encryptedFields to {$modelName}");
-        }
-    }
-    
-    // Update searchableHashFields property
-    if (str_contains($content, 'protected static $searchableHashFields')) {
-        $pattern = '/(protected static \$searchableHashFields\s*=\s*)(\[.*?\])(\s*;)/s';
-        if (preg_match($pattern, $content)) {
-            $newContent = preg_replace($pattern, '$1' . $searchableStr . '$3', $content);
-            if ($newContent !== $content) {
-                $content = $newContent;
-                $changesMade = true;
-                $this->info("✅ Updated searchableHashFields for {$modelName}");
-            }
-        }
-    } else {
-        // Add searchableHashFields property if missing
-        $pattern = '/(protected static \$encryptedFields\s*=\s*' . preg_quote($fieldsStr, '/') . '\s*;\s*)/';
-        if (preg_match($pattern, $content)) {
-            $replacement = "$1    protected static \$searchableHashFields = {$searchableStr};\n";
-            $content = preg_replace($pattern, $replacement, $content, 1);
-            $changesMade = true;
-            $this->info("✅ Added searchableHashFields to {$modelName}");
-        } else {
-            // Try with any encryptedFields value
-            $pattern = '/(protected static \$encryptedFields.*?;\s*)/s';
-            if (preg_match($pattern, $content, $matches)) {
-                $replacement = $matches[1] . "    protected static \$searchableHashFields = {$searchableStr};\n";
-                $content = preg_replace($pattern, $replacement, $content, 1);
-                $changesMade = true;
-                $this->info("✅ Added searchableHashFields to {$modelName}");
-            }
-        }
-    }
-    
-    if ($changesMade) {
-        File::put($modelPath, $content);
-        $this->info("✅ Updated fields configuration in {$modelName}");
-        return true;
-    }
-    
-    return true;
-}
-    
-    /**
-     * Ask user for fields to encrypt
-     */
-    protected function askForFields($modelClass): array
-    {
-        $model = new $modelClass;
-        $table = $model->getTable();
-        
-        if (!Schema::hasTable($table)) {
-            $this->error("Table {$table} does not exist!");
-            return [];
-        }
-        
-        $columns = Schema::getColumnListing($table);
-        
-        $this->info("Available columns in {$table}: " . implode(', ', $columns));
-        
-        $defaultFields = ['email', 'phone'];
-        $availableDefaults = array_intersect($defaultFields, $columns);
-        
-        $fields = $this->ask(
-            'Enter fields to encrypt (comma-separated, e.g., email,phone):',
-            implode(',', $availableDefaults)
-        );
-        
-        return array_map('trim', explode(',', $fields));
-    }
-    
-    /**
-     * Get model file path
-     */
-    protected function getModelPath($modelClass): ?string
-    {
-        // Convert namespace to file path
-        $modelName = class_basename($modelClass);
-        
-        // Try common locations
-        $possiblePaths = [
-            app_path('Models/' . $modelName . '.php'),
-            app_path($modelName . '.php'),
-        ];
-        
-        foreach ($possiblePaths as $path) {
-            if (File::exists($path)) {
-                return $path;
-            }
-        }
-        
-        return null;
-    }
-    
-    /**
-     * Create model file if it doesn't exist
-     */
-    protected function createModelFile($modelClass): ?string
-    {
-        $modelName = class_basename($modelClass);
-        $namespace = str_replace('\\' . $modelName, '', $modelClass);
-        
-        $modelPath = app_path('Models/' . $modelName . '.php');
-        
-        // Create directory if it doesn't exist
-        File::ensureDirectoryExists(dirname($modelPath));
-        
-        $content = "<?php
-
-namespace {$namespace};
-
-use Illuminate\Database\Eloquent\Model;
-use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;
-
-class {$modelName} extends Model
-{
-    use HasEncryptedFields;
-    
-    protected static \$encryptedFields = ['email', 'phone'];
-    protected static \$searchableHashFields = ['email', 'phone'];
-    
-    // Add your model properties and methods here
-}
-";
-        
-        if (File::put($modelPath, $content)) {
-            $this->info("✅ Created model file: {$modelPath}");
-            return $modelPath;
-        }
-        
-        $this->error("Failed to create model file: {$modelPath}");
-        return null;
-    }
-    
-    /**
-     * Create migration for hash columns if needed
-     */
-    protected function createMigrationIfNeeded($modelClass, $fields): bool
-    {
-        $model = new $modelClass;
-        $table = $model->getTable();
-        
-        if (!Schema::hasTable($table)) {
-            $this->error("Table {$table} does not exist!");
-            return false;
-        }
-        
-        // Check if hash columns already exist
-        $existingColumns = Schema::getColumnListing($table);
-        $missingHashColumns = [];
-        
-        foreach ($fields as $field) {
-            if (!in_array($field, $existingColumns)) {
-                $this->warn("⚠️  Field '{$field}' does not exist in table '{$table}'");
-                continue;
-            }
-            
-            $hashColumn = $field . '_hash';
-            if (!in_array($hashColumn, $existingColumns)) {
-                $missingHashColumns[] = $field;
-            }
-        }
-        
-        if (empty($missingHashColumns)) {
-            $this->info("✅ Hash columns already exist in {$table}");
-            return false;
-        }
-        
-        $this->info("Creating migration for hash columns in {$table}...");
-        
-        $timestamp = date('Y_m_d_His');
-        $migrationName = "add_hash_columns_to_{$table}_table";
-        $migrationFile = database_path("migrations/{$timestamp}_{$migrationName}.php");
-        
-        $fieldsStr = var_export($fields, true);
-        
-        $content = '<?php
-
-use Illuminate\Database\Migrations\Migration;
-use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
-
-return new class extends Migration
-{
-    public function up()
-    {
-        Schema::table(\'' . $table . '\', function (Blueprint $table) {
-            // Add hash columns for encrypted fields
-            $columns = ' . $fieldsStr . ';
-            
-            foreach ($columns as $column) {
-                if (Schema::hasColumn(\'' . $table . '\', $column)) {
-                    // Add hash column for searching
-                    $table->string($column . \'_hash\', 64)
-                           ->nullable()
-                           ->index()
-                           ->after($column);
-                    
-                    // Add backup column if enabled
-                    if (config(\'data-encryption.migration.backup_columns\', false)) {
-                        $table->string($column . \'_backup\', 255)
-                               ->nullable()
-                               ->after($column . \'_hash\');
-                    }
-                }
-            }
-        });
-    }
-
-    public function down()
-    {
-        Schema::table(\'' . $table . '\', function (Blueprint $table) {
-            $columns = ' . $fieldsStr . ';
-            
-            foreach ($columns as $column) {
-                if (Schema::hasColumn(\'' . $table . '\', $column . \'_hash\')) {
-                    $table->dropColumn($column . \'_hash\');
-                }
-                
-                if (Schema::hasColumn(\'' . $table . '\', $column . \'_backup\')) {
-                    $table->dropColumn($column . \'_backup\');
-                }
-            }
-        });
-    }
-};';
-        
-        if (File::put($migrationFile, $content)) {
-            $this->info("✅ Created migration file: {$migrationFile}");
-            return true;
-        }
-        
-        $this->error("Failed to create migration file: {$migrationFile}");
-        return false;
-    }
-    
-    /**
-     * Create backup for specific model
-     */
-    protected function createBackup($modelClass)
+    protected function createBackup()
     {
         $this->info('💾 Creating backup...');
         
-        $model = new $modelClass;
-        $table = $model->getTable();
-        $modelName = class_basename($modelClass);
-        
-        $backupPath = database_path('backups/' . date('Y-m-d_His') . '_' . $modelName);
+        $backupPath = database_path('backups/' . date('Y-m-d_His'));
         File::makeDirectory($backupPath, 0755, true, true);
         
-        if (Schema::hasTable($table)) {
-            try {
+        // Backup relevant tables
+        $tables = ['users']; // Add other tables as needed
+        
+        foreach ($tables as $table) {
+            if (Schema::hasTable($table)) {
                 $data = DB::table($table)->get()->toArray();
                 $json = json_encode($data, JSON_PRETTY_PRINT);
                 File::put($backupPath . '/' . $table . '.json', $json);
                 
                 $this->info("   Backed up {$table} table");
-            } catch (\Exception $e) {
-                $this->error("Failed to backup {$table}: " . $e->getMessage());
             }
-        } else {
-            $this->warn("Table {$table} does not exist, skipping backup");
         }
         
         $this->info('✅ Backup created at: ' . $backupPath);
     }
     
-    /**
-     * Encrypt model data
-     */
     protected function encryptModelData($modelClass, $fields, $chunkSize = 1000)
     {
         $this->info("Encrypting {$modelClass}...");
@@ -681,16 +174,13 @@ return new class extends Migration
         $bar = $this->output->createProgressBar($total);
         $bar->start();
         
-        $processed = 0;
-        $encryptedCount = 0;
-        
         // Process in chunks
-        DB::table($table)->orderBy($primaryKey)->chunk($chunkSize, function ($records) use ($table, $fields, $encryptionService, $hashService, $bar, $primaryKey, &$processed, &$encryptedCount) {
+        DB::table($table)->orderBy($primaryKey)->chunk($chunkSize, function ($records) use ($table, $fields, $encryptionService, $hashService, $bar, $primaryKey, $modelClass) {
             foreach ($records as $record) {
                 $updateData = [];
                 
                 foreach ($fields as $field) {
-                    if (!isset($record->$field) || $record->$field === null || $record->$field === '') {
+                    if (!isset($record->$field) || empty($record->$field)) {
                         continue;
                     }
                     
@@ -705,7 +195,7 @@ return new class extends Migration
                         $hashField = $field . '_hash';
                         $updateData[$hashField] = $hashService->hash($value);
                         
-                        $encryptedCount++;
+                       
                     }
                 }
                 
@@ -716,7 +206,6 @@ return new class extends Migration
                         ->update($updateData);
                 }
                 
-                $processed++;
                 $bar->advance();
             }
         });
@@ -724,9 +213,6 @@ return new class extends Migration
         $bar->finish();
         $this->newLine();
         $this->info("✅ {$modelClass} encryption completed");
-        $this->info("📊 Statistics:");
-        $this->line("   - Total records processed: {$processed}");
-        $this->line("   - Fields encrypted: {$encryptedCount}");
     }
 
     protected function isEncrypted($value): bool
