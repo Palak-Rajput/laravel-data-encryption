@@ -49,7 +49,7 @@ class InstallEncryptionCommand extends Command
         
         // Step 3: Add environment variables
         $this->info('🔧 Setting up environment...');
-        $this->addEnvironmentVariables();
+        $this->setupEnvironmentVariables();
         
         // Step 4: Generate encryption key
         $this->generateEncryptionKey();
@@ -313,7 +313,7 @@ return new class extends Migration
         $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
     }
     
-    protected function addEnvironmentVariables()
+    protected function setupEnvironmentVariables()
     {
         $envPath = base_path('.env');
         
@@ -494,3 +494,5 @@ return new class extends Migration
         $this->info('💡 For automatic setup, run: php artisan data-encryption:install --auto');
     }
 }
+
+
