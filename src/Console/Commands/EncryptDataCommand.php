@@ -49,61 +49,57 @@ class EncryptDataCommand extends Command
         $model = new $modelClass;
         $table = $model->getTable();
         
-        // STEP 1: Add HasEncryptedFields trait if missing
-        $traits = class_uses($model);
-        $traitName = 'PalakRajput\DataEncryption\Models\Trait\HasEncryptedFields';
+        // STEP 1: Check if model has HasEncryptedFields trait by checking file content
+        $reflection = new \ReflectionClass($modelClass);
+        $modelPath = $reflection->getFileName();
+        $content = File::get($modelPath);
         
-        if (!in_array($traitName, $traits)) {
-            $this->warn("⚠️ Model {$modelClass} does not use HasEncryptedFields trait");
-            $this->info("📝 Automatically adding HasEncryptedFields trait to {$modelClass}...");
+        $hasTraitImport = str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
+        $hasTraitUsage = str_contains($content, 'use HasEncryptedFields;');
+        $hasEncryptedFields = str_contains($content, 'protected static $encryptedFields');
+        
+        // If any of these are missing, add them
+        if (!$hasTraitImport || !$hasTraitUsage || !$hasEncryptedFields) {
+            $this->warn("⚠️ Model {$modelClass} is missing HasEncryptedFields configuration");
+            $this->info("📝 Automatically adding HasEncryptedFields configuration to {$modelClass}...");
             
             if ($this->addTraitToModel($modelClass)) {
-                $this->info("✅ Successfully added HasEncryptedFields trait to {$modelClass}");
+                $this->info("✅ Successfully added HasEncryptedFields configuration to {$modelClass}");
                 
-                // Clear cache and reload
-                $this->clearClassCache($modelClass);
-                $model = new $modelClass;
+                // Skip the trait detection check since PHP caches it
+                // Instead, just verify the file was modified
+                $content = File::get($modelPath);
+                $hasTraitImport = str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
+                $hasTraitUsage = str_contains($content, 'use HasEncryptedFields;');
+                $hasEncryptedFields = str_contains($content, 'protected static $encryptedFields');
                 
-                // Check again
-                $traits = class_uses($model);
-                if (!in_array($traitName, $traits)) {
-                    $this->error("Trait still not detected. Please restart console and try again.");
+                if (!$hasTraitImport || !$hasTraitUsage || !$hasEncryptedFields) {
+                    $this->error("Failed to verify changes to {$modelClass}");
+                    $this->line("Please add this manually to {$modelClass}:");
+                    $this->line("use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;");
+                    $this->line("use HasEncryptedFields;");
+                    $this->line("protected static \$encryptedFields = ['email', 'phone'];");
+                    $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
                     return;
                 }
             } else {
-                $this->error("Failed to add HasEncryptedFields trait");
+                $this->error("Failed to add HasEncryptedFields configuration");
                 return;
             }
         }
         
-        // STEP 2: Get encrypted fields from model
-        $reflection = new \ReflectionClass($modelClass);
-        $encryptedFields = [];
+        // STEP 2: Get encrypted fields by parsing the file content
+        $encryptedFields = $this->getEncryptedFieldsFromContent($content);
         
-        try {
-            $encryptedFields = $reflection->getStaticPropertyValue('encryptedFields');
-        } catch (\ReflectionException $e) {
-            // Try to add default encrypted fields
-            $this->info("📝 Adding default encrypted fields to {$modelClass}...");
-            if ($this->addEncryptedFieldsToModel($modelClass)) {
-                $reflection = new \ReflectionClass($modelClass);
-                $encryptedFields = $reflection->getStaticPropertyValue('encryptedFields');
-            } else {
-                $this->error("Model doesn't have encryptedFields configured");
-                $this->line("Please add to {$modelClass}:");
-                $this->line("protected static \$encryptedFields = ['email', 'phone'];");
-                $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
-                return;
-            }
-        }
-
         if (empty($encryptedFields)) {
-            $this->error("encryptedFields property is empty");
+            $this->error("encryptedFields property is empty or not found");
             $this->line("Please add fields to encrypt in {$modelClass}:");
             $this->line("protected static \$encryptedFields = ['email', 'phone'];");
             return;
         }
 
+        $this->info("✅ Model configured with fields: " . implode(', ', $encryptedFields));
+        
         // STEP 3: Check if hash columns exist, create migration if needed
         $existingColumns = Schema::getColumnListing($table);
         $needsMigration = false;
@@ -137,6 +133,9 @@ class EncryptDataCommand extends Command
                     Schema::getConnection()->getDoctrineSchemaManager()->getDatabasePlatform()->registerDoctrineTypeMapping('enum', 'string');
                     
                     $this->info("✅ Migration executed!");
+                    
+                    // Refresh existing columns after migration
+                    $existingColumns = Schema::getColumnListing($table);
                 } else {
                     $this->warn("⚠️  Migration created but not executed.");
                     $this->line("Run: php artisan migrate");
@@ -200,6 +199,23 @@ class EncryptDataCommand extends Command
     }
     
     /**
+     * Get encrypted fields from model file content
+     */
+    protected function getEncryptedFieldsFromContent(string $content): array
+    {
+        // Try to extract encryptedFields array from content
+        if (preg_match('/protected static\s+\$encryptedFields\s*=\s*\[(.*?)\]\s*;/s', $content, $matches)) {
+            $fieldsString = $matches[1];
+            // Extract quoted strings
+            if (preg_match_all('/[\'"]([^\'"]+)[\'"]/', $fieldsString, $fieldMatches)) {
+                return $fieldMatches[1];
+            }
+        }
+        
+        return [];
+    }
+    
+    /**
      * Add HasEncryptedFields trait to model
      */
     protected function addTraitToModel(string $modelClass): bool
@@ -214,7 +230,7 @@ class EncryptDataCommand extends Command
             
             $content = File::get($modelPath);
             
-            // Add trait import
+            // Add trait import if missing
             $traitImport = 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;';
             if (!str_contains($content, $traitImport)) {
                 if (str_contains($content, 'namespace ')) {
@@ -226,7 +242,7 @@ class EncryptDataCommand extends Command
                 }
             }
             
-            // Add trait usage
+            // Add trait usage if missing
             if (!str_contains($content, 'use HasEncryptedFields;')) {
                 if (preg_match('/(class\s+\w+\s+extends\s+[^{]+{)/', $content, $matches)) {
                     $classStart = $matches[1];
@@ -238,7 +254,7 @@ class EncryptDataCommand extends Command
                 }
             }
             
-            // Add encrypted fields properties
+            // Add encrypted fields properties if missing
             if (!str_contains($content, 'protected static $encryptedFields')) {
                 $properties = "\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
                 
@@ -264,6 +280,7 @@ class EncryptDataCommand extends Command
             File::copy($modelPath, $modelPath . '.backup-' . date('YmdHis'));
             File::put($modelPath, $content);
             
+            // Clear opcache
             if (function_exists('opcache_invalidate')) {
                 opcache_invalidate($modelPath, true);
             }
@@ -272,48 +289,6 @@ class EncryptDataCommand extends Command
             
         } catch (\Exception $e) {
             $this->error("Error: " . $e->getMessage());
-            return false;
-        }
-    }
-    
-    /**
-     * Add encrypted fields to model
-     */
-    protected function addEncryptedFieldsToModel(string $modelClass): bool
-    {
-        try {
-            $reflection = new \ReflectionClass($modelClass);
-            $modelPath = $reflection->getFileName();
-            
-            $content = File::get($modelPath);
-            
-            if (!str_contains($content, 'protected static $encryptedFields')) {
-                $properties = "\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
-                
-                if (str_contains($content, 'use HasEncryptedFields;')) {
-                    $content = str_replace(
-                        'use HasEncryptedFields;',
-                        'use HasEncryptedFields;' . $properties,
-                        $content
-                    );
-                } else {
-                    if (preg_match('/(class\s+\w+\s+extends\s+[^{]+{)/', $content, $matches)) {
-                        $classStart = $matches[1];
-                        $content = str_replace(
-                            $classStart,
-                            $classStart . $properties,
-                            $content
-                        );
-                    }
-                }
-                
-                File::put($modelPath, $content);
-                return true;
-            }
-            
-            return true;
-            
-        } catch (\Exception $e) {
             return false;
         }
     }
@@ -342,9 +317,11 @@ class EncryptDataCommand extends Command
             }";
             }
             
-            $dropColumns = array_map(function($cols) {
-                return "'" . $cols['hash'] . "', '" . $cols['backup'] . "'";
-            }, array_values($hashColumns));
+            $dropColumns = [];
+            foreach ($hashColumns as $columns) {
+                $dropColumns[] = "'" . $columns['hash'] . "'";
+                $dropColumns[] = "'" . $columns['backup'] . "'";
+            }
             
             $migrationContent = '<?php
 
@@ -374,17 +351,6 @@ return new class extends Migration
         } catch (\Exception $e) {
             $this->error("Migration creation failed: " . $e->getMessage());
             return false;
-        }
-    }
-    
-    /**
-     * Clear class cache
-     */
-    protected function clearClassCache(string $modelClass)
-    {
-        if (function_exists('opcache_invalidate')) {
-            $reflection = new \ReflectionClass($modelClass);
-            opcache_invalidate($reflection->getFileName(), true);
         }
     }
     
