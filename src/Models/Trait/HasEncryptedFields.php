@@ -15,14 +15,17 @@ trait HasEncryptedFields
             $model->encryptFields();
         });
 
-        // REMOVE or MODIFY the retrieved event - it's causing login issues
-        // Don't automatically decrypt on retrieval for login queries
-        static::retrieved(function ($model) {
-            // Only decrypt if not in authentication context
-            if (!app()->runningInConsole() && !request()->is('login', 'logout', 'password/*')) {
-                $model->decryptFields();
-            }
-        });
+        // In HasEncryptedFields trait, modify the retrieved event:
+static::retrieved(function ($model) {
+    // Check if this is an authentication request
+    $isAuthRequest = request()->is('login', 'api/login', 'password/*') || 
+                     request()->routeIs('login') ||
+                     (request()->has('email') && request()->has('password'));
+    
+    if (!$isAuthRequest) {
+        $model->decryptFields();
+    }
+});
 
         static::created(function ($model) {
             $model->indexToMeilisearch();
@@ -35,41 +38,6 @@ trait HasEncryptedFields
         static::deleted(function ($model) {
             $model->removeFromMeilisearch();
         });
-        
-        // Add a new scope for authentication queries
-        static::addGlobalScope('encryption', function (Builder $builder) {
-            // No modification needed here - authentication will work with encrypted data
-        });
-    }
-
-    /**
-     * Override the where clause for email search to handle encryption
-     */
-    public function scopeWhereEmail($query, $email)
-    {
-        // For authentication, we need to search by hash, not by direct email comparison
-        if (in_array('email', static::$encryptedFields ?? [])) {
-            $hashedEmail = hash('sha256', 'laravel-data-encryption' . $email);
-            return $query->where('email_hash', $hashedEmail);
-        }
-        
-        return $query->where('email', $email);
-    }
-
-    /**
-     * Method specifically for authentication
-     */
-    public static function findByEmailForAuth($email)
-    {
-        $model = new static();
-        
-        // If email is encrypted, search by hash
-        if (in_array('email', static::$encryptedFields ?? [])) {
-            $hashedEmail = hash('sha256', 'laravel-data-encryption' . $email);
-            return static::where('email_hash', $hashedEmail)->first();
-        }
-        
-        return static::where('email', $email)->first();
     }
 
     public function indexToMeilisearch()
