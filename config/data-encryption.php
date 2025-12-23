@@ -65,13 +65,5 @@ return [
     ],
      'disable_console_logs' => env('DISABLE_FRONTEND_CONSOLE_LOG', false),
 
-      'middleware_except' => [
-        'login',
-        'logout',
-        'auth/*',
-        'password/*',
-        'register',
-        'forgot-password',
-        'reset-password',
-    ],
+     
 ];

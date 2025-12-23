@@ -52,41 +52,39 @@ class DataEncryptionServiceProvider extends ServiceProvider
         $this->app->alias(HashService::class, 'hash.service');
     }
 
-   // In your DataEncryptionServiceProvider.php boot() method:
-public function boot()
-{
-    // Publish config if it exists
-    if (file_exists(__DIR__.'/../../config/data-encryption.php')) {
-        $this->publishes([
-            __DIR__.'/../../config/data-encryption.php' => config_path('data-encryption.php'),
-        ], 'config');
+    public function boot()
+    {
+        // IMPORTANT: Do NOT register middleware globally for login routes
+        // This was causing login issues
+        
+        // Publish config if it exists
+        if (file_exists(__DIR__.'/../../config/data-encryption.php')) {
+            $this->publishes([
+                __DIR__.'/../../config/data-encryption.php' => config_path('data-encryption.php'),
+            ], 'config');
+        }
+
+        // Publish migrations
+        $this->publishMigrations();
+
+        // Load views if they exist
+        if (file_exists(__DIR__.'/../../resources/views')) {
+            $this->loadViewsFrom(__DIR__.'/../../resources/views', 'data-encryption');
+        }
+
+        // Register package Artisan commands
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                \PalakRajput\DataEncryption\Console\Commands\InstallEncryptionCommand::class,
+                \PalakRajput\DataEncryption\Console\Commands\EncryptDataCommand::class,
+                \PalakRajput\DataEncryption\Console\Commands\ReindexMeilisearch::class,
+                \PalakRajput\DataEncryption\Console\Commands\DebugSearchCommand::class,
+            ]);
+        }
+
+        // Auto-detect and configure User model
+        $this->autoConfigureModels();
     }
-
-    // Publish migrations
-    $this->publishMigrations();
-
-    // Load views if they exist
-    if (file_exists(__DIR__.'/../../resources/views')) {
-        $this->loadViewsFrom(__DIR__.'/../../resources/views', 'data-encryption');
-    }
-
-    // Register package Artisan commands
-    if ($this->app->runningInConsole()) {
-        $this->commands([
-            \PalakRajput\DataEncryption\Console\Commands\InstallEncryptionCommand::class,
-            \PalakRajput\DataEncryption\Console\Commands\EncryptDataCommand::class,
-            \PalakRajput\DataEncryption\Console\Commands\ReindexMeilisearch::class,
-            \PalakRajput\DataEncryption\Console\Commands\DebugSearchCommand::class,
-        ]);
-    }
-
-    // Auto-detect and configure User model
-    $this->autoConfigureModels();
-    
-    // Register middleware but exclude it from global middleware group
-    // Instead, let users add it to specific route groups in their app
-    $this->app['router']->aliasMiddleware('disable.console', \PalakRajput\DataEncryption\Http\Middleware\InjectDisableConsole::class);
-}
 
     /**
      * Publish migrations
