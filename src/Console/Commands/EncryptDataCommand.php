@@ -49,7 +49,7 @@ class EncryptDataCommand extends Command
         $model = new $modelClass;
         $table = $model->getTable();
         
-        // STEP 1: Check if model has HasEncryptedFields trait by checking file content
+        // STEP 1: Check if model has HasEncryptedFields configuration
         $reflection = new \ReflectionClass($modelClass);
         $modelPath = $reflection->getFileName();
         $content = File::get($modelPath);
@@ -66,22 +66,9 @@ class EncryptDataCommand extends Command
             if ($this->addTraitToModel($modelClass)) {
                 $this->info("✅ Successfully added HasEncryptedFields configuration to {$modelClass}");
                 
-                // Skip the trait detection check since PHP caches it
-                // Instead, just verify the file was modified
-                $content = File::get($modelPath);
-                $hasTraitImport = str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
-                $hasTraitUsage = str_contains($content, 'use HasEncryptedFields;');
-                $hasEncryptedFields = str_contains($content, 'protected static $encryptedFields');
-                
-                if (!$hasTraitImport || !$hasTraitUsage || !$hasEncryptedFields) {
-                    $this->error("Failed to verify changes to {$modelClass}");
-                    $this->line("Please add this manually to {$modelClass}:");
-                    $this->line("use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;");
-                    $this->line("use HasEncryptedFields;");
-                    $this->line("protected static \$encryptedFields = ['email', 'phone'];");
-                    $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
-                    return;
-                }
+                // Clear cache and reload
+                $this->clearClassCache($modelClass);
+                $model = new $modelClass;
             } else {
                 $this->error("Failed to add HasEncryptedFields configuration");
                 return;
@@ -115,6 +102,9 @@ class EncryptDataCommand extends Command
                     'hash' => $hashColumn,
                     'backup' => $backupColumn
                 ];
+                $this->info("⚠️ Missing hash column: {$hashColumn}");
+            } else {
+                $this->info("✅ Hash column exists: {$hashColumn}");
             }
         }
         
@@ -129,12 +119,12 @@ class EncryptDataCommand extends Command
                 if ($this->confirm('Run the migration now?', true)) {
                     $this->call('migrate');
                     
+                    $this->info("✅ Migration executed!");
+                    
                     // Refresh schema cache
                     Schema::getConnection()->getDoctrineSchemaManager()->getDatabasePlatform()->registerDoctrineTypeMapping('enum', 'string');
                     
-                    $this->info("✅ Migration executed!");
-                    
-                    // Refresh existing columns after migration
+                    // Update existing columns after migration
                     $existingColumns = Schema::getColumnListing($table);
                 } else {
                     $this->warn("⚠️  Migration created but not executed.");
@@ -146,14 +136,29 @@ class EncryptDataCommand extends Command
                 $this->error("Failed to create migration");
                 return;
             }
+        } elseif (!$needsMigration) {
+            $this->info("✅ All hash columns already exist in database");
         }
         
-        // STEP 5: Backup if requested
+        // STEP 5: Check if we can proceed with encryption
+        $fields = array_filter($encryptedFields, function($field) use ($existingColumns) {
+            $hashColumn = $field . '_hash';
+            return in_array($field, $existingColumns) && in_array($hashColumn, $existingColumns);
+        });
+        
+        if (empty($fields)) {
+            $this->warn("⚠️  No fields to encrypt or missing hash columns");
+            $this->line("Make sure hash columns exist for: " . implode(', ', $encryptedFields));
+            $this->line("Run migrations first or use --skip-migration to skip hash column check");
+            return;
+        }
+        
+        // STEP 6: Backup if requested
         if ($this->option('backup')) {
             $this->createBackup($modelClass);
         }
         
-        // STEP 6: Confirm encryption
+        // STEP 7: Confirm encryption
         if (!$this->option('force')) {
             $this->warn('⚠️  This will encrypt data IN-PLACE in your database!');
             $this->warn('   Make sure you have a backup!');
@@ -163,38 +168,35 @@ class EncryptDataCommand extends Command
             }
         }
         
-        // STEP 7: Encrypt data
-        $fields = array_filter($encryptedFields, function($field) use ($existingColumns) {
-            return in_array($field, $existingColumns);
-        });
-        
-        if (empty($fields)) {
-            $this->warn("⚠️  No fields to encrypt in {$modelClass}");
-            return;
-        }
-        
+        // STEP 8: Encrypt data
         $this->info("Encrypting fields for {$modelClass}: " . implode(', ', $fields));
         $this->encryptModelData($modelClass, $fields, $this->option('chunk'));
         
         $this->info('✅ Data encryption completed!');
         
-        // STEP 8: Reindex to Meilisearch
-        if (config('data-encryption.meilisearch.enabled', true)) {
-            $this->info("\n🔍 Indexing to Meilisearch for search...");
-            
-            $meilisearch = app(MeilisearchService::class);
-            $indexName = $model->getMeilisearchIndexName();
-            
-            if ($meilisearch->initializeIndex($indexName)) {
-                $this->info("✅ Meilisearch index '{$indexName}' configured!");
+        // STEP 9: Reindex to Meilisearch (only if trait method exists)
+        try {
+            if (config('data-encryption.meilisearch.enabled', true) && method_exists($model, 'getMeilisearchIndexName')) {
+                $this->info("\n🔍 Indexing to Meilisearch for search...");
                 
-                $this->call('data-encryption:reindex', [
-                    '--model' => $modelClass,
-                    '--force' => true,
-                ]);
+                $meilisearch = app(MeilisearchService::class);
+                $indexName = $model->getMeilisearchIndexName();
+                
+                if ($meilisearch->initializeIndex($indexName)) {
+                    $this->info("✅ Meilisearch index '{$indexName}' configured!");
+                    
+                    $this->call('data-encryption:reindex', [
+                        '--model' => $modelClass,
+                        '--force' => true,
+                    ]);
+                } else {
+                    $this->error("❌ Failed to configure Meilisearch index");
+                }
             } else {
-                $this->error("❌ Failed to configure Meilisearch index");
+                $this->info("\n⚠️ Meilisearch not enabled or model doesn't support Meilisearch indexing");
             }
+        } catch (\Exception $e) {
+            $this->warn("⚠️ Meilisearch indexing failed: " . $e->getMessage());
         }
     }
     
@@ -229,6 +231,7 @@ class EncryptDataCommand extends Command
             }
             
             $content = File::get($modelPath);
+            $originalContent = $content;
             
             // Add trait import if missing
             $traitImport = 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;';
@@ -276,13 +279,16 @@ class EncryptDataCommand extends Command
                 }
             }
             
-            // Backup and save
-            File::copy($modelPath, $modelPath . '.backup-' . date('YmdHis'));
-            File::put($modelPath, $content);
-            
-            // Clear opcache
-            if (function_exists('opcache_invalidate')) {
-                opcache_invalidate($modelPath, true);
+            // Only save if content changed
+            if ($content !== $originalContent) {
+                // Backup and save
+                File::copy($modelPath, $modelPath . '.backup-' . date('YmdHis'));
+                File::put($modelPath, $content);
+                
+                // Clear opcache
+                if (function_exists('opcache_invalidate')) {
+                    opcache_invalidate($modelPath, true);
+                }
             }
             
             return true;
@@ -301,7 +307,6 @@ class EncryptDataCommand extends Command
         try {
             $model = new $modelClass;
             $table = $model->getTable();
-            $modelName = class_basename($modelClass);
             
             $timestamp = date('Y_m_d_His');
             $migrationName = "add_hash_columns_to_{$table}_table";
@@ -346,11 +351,27 @@ return new class extends Migration
 };';
             
             File::put($migrationFile, $migrationContent);
+            $this->info("📄 Migration file created: " . basename($migrationFile));
             return true;
             
         } catch (\Exception $e) {
             $this->error("Migration creation failed: " . $e->getMessage());
             return false;
+        }
+    }
+    
+    /**
+     * Clear class cache
+     */
+    protected function clearClassCache(string $modelClass)
+    {
+        if (function_exists('opcache_invalidate')) {
+            try {
+                $reflection = new \ReflectionClass($modelClass);
+                opcache_invalidate($reflection->getFileName(), true);
+            } catch (\Exception $e) {
+                // Ignore opcache errors
+            }
         }
     }
     
