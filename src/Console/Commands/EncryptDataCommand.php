@@ -48,10 +48,10 @@ class EncryptDataCommand extends Command
         
         $model = new $modelClass;
         $table = $model->getTable();
-        
-        // STEP 1: Check if model has HasEncryptedFields configuration
         $reflection = new \ReflectionClass($modelClass);
         $modelPath = $reflection->getFileName();
+        
+        // STEP 1: Check and add HasEncryptedFields configuration if needed
         $content = File::get($modelPath);
         
         $hasTraitImport = str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
@@ -66,22 +66,37 @@ class EncryptDataCommand extends Command
             if ($this->addTraitToModel($modelClass)) {
                 $this->info("✅ Successfully added HasEncryptedFields configuration to {$modelClass}");
                 
-                // Clear cache and reload
+                // Clear cache
                 $this->clearClassCache($modelClass);
-                $model = new $modelClass;
+                
+                // Re-read the updated content
+                $content = File::get($modelPath);
+                $hasTraitImport = str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
+                $hasTraitUsage = str_contains($content, 'use HasEncryptedFields;');
+                $hasEncryptedFields = str_contains($content, 'protected static $encryptedFields');
+                
+                if (!$hasTraitImport || !$hasTraitUsage || !$hasEncryptedFields) {
+                    $this->error("Failed to verify changes to {$modelClass}. Please add manually:");
+                    $this->line("use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;");
+                    $this->line("use HasEncryptedFields;");
+                    $this->line("protected static \$encryptedFields = ['email', 'phone'];");
+                    $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
+                    return;
+                }
             } else {
                 $this->error("Failed to add HasEncryptedFields configuration");
                 return;
             }
         }
         
-        // STEP 2: Get encrypted fields by parsing the file content
+        // STEP 2: Get encrypted fields from updated content
         $encryptedFields = $this->getEncryptedFieldsFromContent($content);
         
         if (empty($encryptedFields)) {
             $this->error("encryptedFields property is empty or not found");
             $this->line("Please add fields to encrypt in {$modelClass}:");
             $this->line("protected static \$encryptedFields = ['email', 'phone'];");
+            $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
             return;
         }
 
@@ -214,6 +229,14 @@ class EncryptDataCommand extends Command
             }
         }
         
+        // Try alternative pattern
+        if (preg_match('/\$encryptedFields\s*=\s*\[(.*?)\]\s*;/s', $content, $matches)) {
+            $fieldsString = $matches[1];
+            if (preg_match_all('/[\'"]([^\'"]+)[\'"]/', $fieldsString, $fieldMatches)) {
+                return $fieldMatches[1];
+            }
+        }
+        
         return [];
     }
     
@@ -227,19 +250,32 @@ class EncryptDataCommand extends Command
             $modelPath = $reflection->getFileName();
             
             if (!File::exists($modelPath)) {
+                $this->error("Model file not found: {$modelPath}");
                 return false;
             }
             
             $content = File::get($modelPath);
             $originalContent = $content;
             
+            // Debug: Show current content
+            $this->line("\n📄 Current model content (first 500 chars):");
+            $this->line(substr($content, 0, 500) . "...");
+            
             // Add trait import if missing
             $traitImport = 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;';
             if (!str_contains($content, $traitImport)) {
+                $this->info("Adding trait import...");
                 if (str_contains($content, 'namespace ')) {
                     $content = preg_replace(
                         '/(namespace [^;]+;)/',
                         "$1\n\n{$traitImport}",
+                        $content
+                    );
+                } else {
+                    // Add at the beginning after PHP tag
+                    $content = preg_replace(
+                        '/^<\?php\s*/',
+                        "<?php\n\n{$traitImport}\n",
                         $content
                     );
                 }
@@ -247,7 +283,15 @@ class EncryptDataCommand extends Command
             
             // Add trait usage if missing
             if (!str_contains($content, 'use HasEncryptedFields;')) {
+                $this->info("Adding trait usage...");
                 if (preg_match('/(class\s+\w+\s+extends\s+[^{]+{)/', $content, $matches)) {
+                    $classStart = $matches[1];
+                    $content = str_replace(
+                        $classStart,
+                        $classStart . "\n    use HasEncryptedFields;",
+                        $content
+                    );
+                } elseif (preg_match('/(class\s+\w+\s*{)/', $content, $matches)) {
                     $classStart = $matches[1];
                     $content = str_replace(
                         $classStart,
@@ -259,6 +303,7 @@ class EncryptDataCommand extends Command
             
             // Add encrypted fields properties if missing
             if (!str_contains($content, 'protected static $encryptedFields')) {
+                $this->info("Adding encrypted fields properties...");
                 $properties = "\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
                 
                 if (str_contains($content, 'use HasEncryptedFields;')) {
@@ -268,7 +313,15 @@ class EncryptDataCommand extends Command
                         $content
                     );
                 } else {
+                    // Find class and add after opening brace
                     if (preg_match('/(class\s+\w+\s+extends\s+[^{]+{)/', $content, $matches)) {
+                        $classStart = $matches[1];
+                        $content = str_replace(
+                            $classStart,
+                            $classStart . $properties,
+                            $content
+                        );
+                    } elseif (preg_match('/(class\s+\w+\s*{)/', $content, $matches)) {
                         $classStart = $matches[1];
                         $content = str_replace(
                             $classStart,
@@ -281,20 +334,33 @@ class EncryptDataCommand extends Command
             
             // Only save if content changed
             if ($content !== $originalContent) {
+                $this->info("Saving changes to model file...");
+                
                 // Backup and save
-                File::copy($modelPath, $modelPath . '.backup-' . date('YmdHis'));
+                $backupPath = $modelPath . '.backup-' . date('YmdHis');
+                File::copy($modelPath, $backupPath);
+                $this->info("Backup created: " . basename($backupPath));
+                
                 File::put($modelPath, $content);
+                
+                // Debug: Show updated content
+                $this->line("\n📄 Updated model content (first 500 chars):");
+                $this->line(substr($content, 0, 500) . "...");
                 
                 // Clear opcache
                 if (function_exists('opcache_invalidate')) {
                     opcache_invalidate($modelPath, true);
                 }
+                
+                return true;
+            } else {
+                $this->info("No changes needed - model already has correct configuration");
+                return true;
             }
             
-            return true;
-            
         } catch (\Exception $e) {
-            $this->error("Error: " . $e->getMessage());
+            $this->error("Error modifying model: " . $e->getMessage());
+            $this->error("Trace: " . $e->getTraceAsString());
             return false;
         }
     }
@@ -311,6 +377,12 @@ class EncryptDataCommand extends Command
             $timestamp = date('Y_m_d_His');
             $migrationName = "add_hash_columns_to_{$table}_table";
             $migrationFile = database_path("migrations/{$timestamp}_{$migrationName}.php");
+            
+            // Check if migration already exists
+            if (File::exists($migrationFile)) {
+                $this->warn("Migration already exists: " . basename($migrationFile));
+                return true;
+            }
             
             // Create migration content
             $fieldsCode = '';
@@ -350,12 +422,24 @@ return new class extends Migration
     }
 };';
             
+            // Ensure migrations directory exists
+            $migrationsDir = database_path('migrations');
+            if (!File::exists($migrationsDir)) {
+                File::makeDirectory($migrationsDir, 0755, true);
+            }
+            
             File::put($migrationFile, $migrationContent);
             $this->info("📄 Migration file created: " . basename($migrationFile));
+            
+            // Show the migration content
+            $this->line("\n📋 Migration content:");
+            $this->line($migrationContent);
+            
             return true;
             
         } catch (\Exception $e) {
             $this->error("Migration creation failed: " . $e->getMessage());
+            $this->error("Trace: " . $e->getTraceAsString());
             return false;
         }
     }
