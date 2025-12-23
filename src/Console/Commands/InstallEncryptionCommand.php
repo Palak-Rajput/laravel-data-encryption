@@ -7,8 +7,8 @@ use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
-use App\Models\User;
 use PalakRajput\DataEncryption\Services\MeilisearchService;
+use ReflectionClass;
 
 class InstallEncryptionCommand extends Command
 {
@@ -17,6 +17,7 @@ class InstallEncryptionCommand extends Command
                             {--yes : Skip all confirmation prompts (use with --auto)}
                             {--models= : Comma-separated list of models to encrypt}
                             {--fields= : Comma-separated list of fields to encrypt}
+                            {--searchable= : Comma-separated list of fields for searchable hashes}
                             {--backup : Include backup columns in migration}';
     
     protected $description = 'Install and setup Data Encryption package automatically';
@@ -43,107 +44,119 @@ class InstallEncryptionCommand extends Command
             '--force' => true
         ]);
         
-        // Step 2: Create and publish migrations
-        $this->info('📊 Publishing migrations...');
-        $this->createAndPublishMigrations();
+        // Step 2: Get models to process
+        $modelsInput = $this->option('models');
+        if ($modelsInput) {
+            $models = array_map('trim', explode(',', $modelsInput));
+        } else {
+            $models = $this->getDefaultModels();
+        }
         
-        // Step 3: Add environment variables
+        // Get fields to encrypt
+        $fieldsInput = $this->option('fields');
+        $fields = $fieldsInput ? array_map('trim', explode(',', $fieldsInput)) : ['email', 'phone'];
+        
+        // Get searchable fields
+        $searchableInput = $this->option('searchable');
+        $searchableFields = $searchableInput ? array_map('trim', explode(',', $searchableInput)) : $fields;
+        
+        // Step 3: Create and publish migrations for each model
+        $this->info('📊 Creating migrations...');
+        foreach ($models as $modelClass) {
+            $this->createMigrationForModel($modelClass, $fields);
+        }
+        
+        // Step 4: Add environment variables
         $this->info('🔧 Setting up environment...');
         $this->addEnvironmentVariables();
         
-        // Step 4: Generate encryption key
+        // Step 5: Generate encryption key
         $this->generateEncryptionKey();
         
-        // Step 5: Setup Meilisearch (optional)
+        // Step 6: Setup Meilisearch (optional)
         if ($auto || $skipConfirm || $this->confirm('Setup Meilisearch for encrypted data search?', false)) {
             $this->setupMeilisearch();
         }
         
-        // Step 6: Run migrations automatically if --auto flag
+        // Step 7: Run migrations automatically if --auto flag
         if ($auto || $skipConfirm) {
             $this->info('🚀 Running migrations...');
             $this->call('migrate');
             
-            // Step 7: Auto-detect models and encrypt
-            $this->autoSetupModels($skipConfirm);
+            // Step 8: Configure models and encrypt
+            foreach ($models as $modelClass) {
+                $this->setupAndEncryptModel($modelClass, $fields, $searchableFields, $skipConfirm);
+            }
             
             $this->info('✅ Installation COMPLETE! All steps done automatically.');
         } else {
-            $this->showNextSteps();
+            $this->showNextSteps($models, $fields);
         }
     }
     
     /**
-     * Create migration file if it doesn't exist and publish it
+     * Get default models to encrypt
      */
-    protected function createAndPublishMigrations()
+    protected function getDefaultModels(): array
     {
-        // First, ensure the migration exists in the package
-        $this->createMigrationIfMissing();
+        $defaultModels = [];
         
-        // Now publish it
-        $this->call('vendor:publish', [
-            '--provider' => 'PalakRajput\\DataEncryption\\Providers\\DataEncryptionServiceProvider',
-            '--tag' => 'migrations',
-            '--force' => true
-        ]);
+        // Check for User model
+        if (class_exists('App\Models\User')) {
+            $defaultModels[] = 'App\Models\User';
+        }
         
-        $this->info('✅ Migration published successfully');
-    }
-    
-    /**
-     * Create migration file in vendor directory if it doesn't exist
-     */
-    protected function createMigrationIfMissing()
-    {
-        $vendorDir = base_path('vendor/palak-rajput/laravel-data-encryption');
+        // Check for other common models
+        $commonModels = [
+            'App\Models\Customer',
+            'App\Models\Employee',
+            'App\Models\Client',
+            'App\Models\Patient',
+            'App\Models\Member',
+        ];
         
-        // Check if package is installed via composer
-        if (!File::exists($vendorDir)) {
-            // Try to find it in a different location
-            $vendorDir = base_path('vendor/palak-rajput/laravel-data-encryption');
-            
-            if (!File::exists($vendorDir)) {
-                $this->warn('⚠️  Package not found in vendor directory. Using direct migration creation.');
-                $this->createMigrationDirectly();
-                return;
+        foreach ($commonModels as $model) {
+            if (class_exists($model)) {
+                $defaultModels[] = $model;
             }
         }
         
-        // Create database/migrations directory if it doesn't exist
-        $migrationsDir = $vendorDir . '/database/migrations';
-        if (!File::exists($migrationsDir)) {
-            File::makeDirectory($migrationsDir, 0755, true);
+        // If no models found, ask user
+        if (empty($defaultModels)) {
+            $modelInput = $this->ask('Enter model classes to encrypt (comma-separated, e.g., App\Models\User,App\Models\Customer):', 'App\Models\User');
+            $defaultModels = array_map('trim', explode(',', $modelInput));
         }
         
-        $migrationFile = $migrationsDir . '/add_hash_columns_to_users_table.php';
-        
-        if (!File::exists($migrationFile)) {
-            $this->createMigrationFile($migrationFile);
-            $this->info('✅ Created missing migration file in package');
-        }
+        return $defaultModels;
     }
     
     /**
-     * Create migration file directly in the project if package not found
+     * Create migration for specific model
      */
-    protected function createMigrationDirectly()
+    protected function createMigrationForModel($modelClass, $fields = ['email', 'phone'])
     {
-        $timestamp = date('Y_m_d_His');
-        $migrationFile = database_path("migrations/{$timestamp}_add_hash_columns_to_users_table.php");
-        
-        if (!File::exists($migrationFile)) {
-            $this->createMigrationFile($migrationFile);
-            $this->info('✅ Created migration file directly in project');
+        if (!class_exists($modelClass)) {
+            $this->warn("⚠️  Model {$modelClass} not found! Skipping migration creation.");
+            return;
         }
-    }
-    
-    /**
-     * Create the migration file content
-     */
-    protected function createMigrationFile($filePath)
-    {
-        $content = '<?php
+        
+        try {
+            $model = new $modelClass;
+            $table = $model->getTable();
+            
+            $timestamp = date('Y_m_d_His');
+            $migrationName = "add_hash_columns_to_{$table}_table";
+            $migrationFile = database_path("migrations/{$timestamp}_{$migrationName}.php");
+            
+            // Check if migration already exists
+            if (File::exists($migrationFile)) {
+                $this->info("✅ Migration for {$modelClass} already exists");
+                return;
+            }
+            
+            $fieldsStr = var_export($fields, true);
+            
+            $content = '<?php
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
@@ -153,12 +166,12 @@ return new class extends Migration
 {
     public function up()
     {
-        Schema::table(\'users\', function (Blueprint $table) {
+        Schema::table(\'' . $table . '\', function (Blueprint $table) {
             // Add hash columns for encrypted fields
-            $columns = [\'email\', \'phone\'];
+            $columns = ' . $fieldsStr . ';
             
             foreach ($columns as $column) {
-                if (Schema::hasColumn(\'users\', $column)) {
+                if (Schema::hasColumn(\'' . $table . '\', $column)) {
                     // Add hash column for searching
                     $table->string($column . \'_hash\', 64)
                            ->nullable()
@@ -178,178 +191,114 @@ return new class extends Migration
 
     public function down()
     {
-        Schema::table(\'users\', function (Blueprint $table) {
-            $columns = [\'email\', \'phone\'];
+        Schema::table(\'' . $table . '\', function (Blueprint $table) {
+            $columns = ' . $fieldsStr . ';
             
             foreach ($columns as $column) {
-                if (Schema::hasColumn(\'users\', $column . \'_hash\')) {
+                if (Schema::hasColumn(\'' . $table . '\', $column . \'_hash\')) {
                     $table->dropColumn($column . \'_hash\');
                 }
                 
-                if (Schema::hasColumn(\'users\', $column . \'_backup\')) {
+                if (Schema::hasColumn(\'' . $table . '\', $column . \'_backup\')) {
                     $table->dropColumn($column . \'_backup\');
                 }
             }
         });
     }
 };';
+            
+            File::put($migrationFile, $content);
+            $this->info("✅ Created migration for {$modelClass} (table: {$table})");
+        } catch (\Exception $e) {
+            $this->error("Failed to create migration for {$modelClass}: " . $e->getMessage());
+        }
+    }
+    
+    /**
+     * Setup and encrypt a model
+     */
+    protected function setupAndEncryptModel($modelClass, $fields, $searchableFields, $skipConfirm = false)
+    {
+        $this->info("\n🤖 Configuring {$modelClass}...");
         
-        File::put($filePath, $content);
-    }
-    
-    protected function autoSetupModels($skipConfirm = false)
-    {
-        $this->info('🤖 Auto-configuring models...');
-
-        if (!class_exists('App\Models\User')) {
-            $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
+        if (!class_exists($modelClass)) {
+            $this->warn("⚠️  Model {$modelClass} not found. Skipping.");
             return;
         }
-
-        // 1️⃣ Ensure trait & properties exist
-        $this->setupUserModel();
-
-        if (!($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true)))) {
+        
+        // Auto-add HasEncryptedFields trait
+        $encryptCommand = new EncryptDataCommand();
+        $encryptCommand->setLaravel($this->laravel);
+        
+        // Add trait to model
+        $modelUpdated = $encryptCommand->addHasEncryptedFieldsTrait($modelClass);
+        
+        if (!$modelUpdated) {
+            $this->error("Failed to add HasEncryptedFields trait to {$modelClass}");
             return;
         }
-
-        $backup = $this->option('backup') ? true : false;
-
-        /*
-        |--------------------------------------------------------------------------
-        | STEP 1: Initialize Meilisearch index FIRST
-        |--------------------------------------------------------------------------
-        */
-        $this->info('🔧 Initializing Meilisearch index...');
-
-        $meilisearch = app(\PalakRajput\DataEncryption\Services\MeilisearchService::class);
-        $model       = new \App\Models\User();
-        $indexName   = $model->getMeilisearchIndexName();
-
-        if (!$meilisearch->initializeIndex($indexName)) {
-            $this->error("❌ Failed to initialize Meilisearch index: {$indexName}");
-            return;
+        
+        // Update model with fields configuration
+        $encryptCommand->updateModelWithFields($modelClass, $fields, $searchableFields);
+        
+        // Check if we should encrypt data
+        if ($skipConfirm || $this->confirm("Encrypt existing data for {$modelClass} now?", true)) {
+            $backup = $this->option('backup') ? true : false;
+            
+            $this->info("🔐 Encrypting data for {$modelClass}...");
+            
+            // Use the encrypt command to handle encryption
+            $this->call('data-encryption:encrypt', [
+                'model' => $modelClass,
+                '--backup' => $backup,
+                '--fields' => implode(',', $fields),
+                '--searchable' => implode(',', $searchableFields),
+                '--chunk' => 1000,
+                '--force' => true,
+            ]);
         }
-
-        $this->info("✅ Meilisearch index '{$indexName}' initialized");
-
-        /*
-        |--------------------------------------------------------------------------
-        | STEP 2: Encrypt existing data
-        |--------------------------------------------------------------------------
-        */
-        $this->info('🔐 Encrypting User data...');
-
-        $this->call('data-encryption:encrypt', [
-            '--model'  => 'App\Models\User',
-            '--backup' => $backup,
-            '--chunk'  => 1000,
-            '--force'  => true,
-        ]);
-
-        /*
-        |--------------------------------------------------------------------------
-        | STEP 3: Reindex encrypted data
-        |--------------------------------------------------------------------------
-        */
-        $this->info('🔍 Reindexing encrypted data to Meilisearch...');
-
-        $this->call('data-encryption:reindex', [
-            '--model' => 'App\Models\User',
-            '--force' => true,
-        ]);
-
-        /*
-        |--------------------------------------------------------------------------
-        | DONE
-        |--------------------------------------------------------------------------
-        */
-        $this->info('✅ Setup complete! Partial search is now enabled.');
-        $this->info('💡 Try searching for: gmail, user, @example.com');
-    }
-    
-    protected function setupUserModel()
-    {
-        $userModelPath = app_path('Models/User.php');
-
-        if (!File::exists($userModelPath)) {
-            $this->warn('⚠️  User model not found at: ' . $userModelPath);
-            return;
-        }
-
-        $content = File::get($userModelPath);
-
-        // Add trait import if missing
-        if (!str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;')) {
-            $content = preg_replace(
-                '/^(namespace App\\\\Models;)/m',
-                "$1\n\nuse PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;",
-                $content
-            );
-        }
-
-        // Add trait inside class if missing
-        if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
-            $content = preg_replace(
-                '/(class User extends [^{]+\{)/',
-                "$1\n    use HasEncryptedFields;",
-                $content
-            );
-        }
-
-        // Add encrypted fields properties if missing
-        if (!str_contains($content, 'protected static $encryptedFields') &&
-            !str_contains($content, 'protected static $searchableHashFields')) {
-
-            $content = preg_replace(
-                '/(class User extends [^{]+\{)/',
-                "$1\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];",
-                $content,
-                1
-            );
-        }
-
-        File::put($userModelPath, $content);
-        $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
     }
     
     protected function addEnvironmentVariables()
     {
         $envPath = base_path('.env');
         
-        if (File::exists($envPath)) {
-            $envContent = File::get($envPath);
-            
-            $variables = [
-                '# Data Encryption Package - ENCRYPTS DATA IN-PLACE',
-                'ENCRYPTION_CIPHER=AES-256-CBC',
-                'ENCRYPTION_KEY=' . (env('APP_KEY') ?: 'base64:' . base64_encode(random_bytes(32))),
-                'HASH_ALGORITHM=sha256',
-                'HASH_SALT=laravel-data-encryption-' . uniqid(),
-                '# Meilisearch Configuration',
-                'MEILISEARCH_HOST=http://localhost:7700',
-                'MEILISEARCH_KEY=',
-                'MEILISEARCH_INDEX_PREFIX=encrypted_',
-            ];
-            
-            $added = [];
-            foreach ($variables as $variable) {
-                if (str_starts_with($variable, '#')) {
-                    if (!str_contains($envContent, $variable)) {
-                        File::append($envPath, PHP_EOL . $variable);
-                    }
-                } else {
-                    $key = explode('=', $variable)[0];
-                    if (!str_contains($envContent, $key)) {
-                        File::append($envPath, PHP_EOL . $variable);
-                        $added[] = $key;
-                    }
+        if (!File::exists($envPath)) {
+            $this->warn('⚠️  .env file not found');
+            return;
+        }
+        
+        $envContent = File::get($envPath);
+        
+        $variables = [
+            '# Data Encryption Package - ENCRYPTS DATA IN-PLACE',
+            'ENCRYPTION_CIPHER=AES-256-CBC',
+            'ENCRYPTION_KEY=' . (env('APP_KEY') ?: 'base64:' . base64_encode(random_bytes(32))),
+            'HASH_ALGORITHM=sha256',
+            'HASH_SALT=laravel-data-encryption-' . uniqid(),
+            '# Meilisearch Configuration',
+            'MEILISEARCH_HOST=http://localhost:7700',
+            'MEILISEARCH_KEY=',
+            'MEILISEARCH_INDEX_PREFIX=encrypted_',
+        ];
+        
+        $added = [];
+        foreach ($variables as $variable) {
+            if (str_starts_with($variable, '#')) {
+                if (!str_contains($envContent, $variable)) {
+                    File::append($envPath, PHP_EOL . $variable);
+                }
+            } else {
+                $key = explode('=', $variable)[0];
+                if (!str_contains($envContent, $key . '=')) {
+                    File::append($envPath, PHP_EOL . $variable);
+                    $added[] = $key;
                 }
             }
-            
-            if (!empty($added)) {
-                $this->info('✅ Added environment variables: ' . implode(', ', $added));
-            }
+        }
+        
+        if (!empty($added)) {
+            $this->info('✅ Added environment variables: ' . implode(', ', $added));
         }
     }
     
@@ -455,7 +404,7 @@ return new class extends Migration
         }
     }
     
-    protected function showNextSteps()
+    protected function showNextSteps($models, $fields)
     {
         $this->newLine();
         $this->info('📝 Installation Steps Remaining:');
@@ -463,34 +412,30 @@ return new class extends Migration
         if ($this->confirm('Run migrations now?', true)) {
             $this->call('migrate');
             
-            if ($this->confirm('Add HasEncryptedFields trait to User model automatically?', true)) {
-                $this->setupUserModel();
-                
-                if ($this->confirm('Encrypt existing User data now?', false)) {
-                    $backup = $this->option('backup') ? true : false;
-                    
-                    $this->call('data-encryption:encrypt', [
-                        'model' => 'App\Models\User',
-                        '--backup' => $backup,
-                        '--chunk' => 1000,
-                    ]);
-                    
-                    $this->info('✅ All steps completed!');
-                    return;
+            foreach ($models as $modelClass) {
+                if ($this->confirm("Add HasEncryptedFields trait to {$modelClass} automatically?", true)) {
+                    $this->setupAndEncryptModel($modelClass, $fields, $fields, false);
                 }
             }
+            
+            $this->info('✅ All steps completed!');
+            return;
         }
         
         $this->newLine();
         $this->info('Manual steps if skipped:');
         $this->line('1. Run migrations: php artisan migrate');
-        $this->line('2. Add trait to User.php:');
-        $this->line('   use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
-        $this->line('   protected static $encryptedFields = [\'email\', \'phone\'];');
-        $this->line('   protected static $searchableHashFields = [\'email\', \'phone\'];');
-        $this->line('3. Encrypt data: php artisan data-encryption:encrypt "App\Models\User" --backup');
-        $this->newLine();
         
+        foreach ($models as $modelClass) {
+            $this->line("\nFor {$modelClass}:");
+            $this->line('   Add to your model:');
+            $this->line('   use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
+            $this->line('   protected static $encryptedFields = ' . var_export($fields, true) . ';');
+            $this->line('   protected static $searchableHashFields = ' . var_export($fields, true) . ';');
+            $this->line('   Encrypt data: php artisan data-encryption:encrypt "' . $modelClass . '" --backup');
+        }
+        
+        $this->newLine();
         $this->info('💡 For automatic setup, run: php artisan data-encryption:install --auto');
     }
 }
