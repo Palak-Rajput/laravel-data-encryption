@@ -17,7 +17,8 @@ class EncryptDataCommand extends Command
                         {--backup : Create backup before encryption}
                         {--field= : Specific field to encrypt}
                         {--chunk=1000 : Number of records to process at once}
-                        {--force : Skip confirmation prompts}';
+                        {--force : Skip confirmation prompts}
+                        {--debug : Show debug information}';
     
     protected $description = 'Encrypt existing data in the database';
     
@@ -47,30 +48,76 @@ class EncryptDataCommand extends Command
         // Check if model uses HasEncryptedFields trait
         $model = new $modelClass;
         $traits = class_uses($model);
+        
+        if ($this->option('debug')) {
+            $this->info("Debug: Current traits in model: " . implode(', ', $traits));
+        }
+        
         $traitName = 'PalakRajput\DataEncryption\Models\Trait\HasEncryptedFields';
         
         if (!in_array($traitName, $traits)) {
             $this->warn("⚠️ Model {$modelClass} does not use HasEncryptedFields trait");
             $this->info("📝 Automatically adding HasEncryptedFields trait to {$modelClass}...");
             
+            // Show current model content if debug
+            if ($this->option('debug')) {
+                $reflection = new \ReflectionClass($modelClass);
+                $modelPath = $reflection->getFileName();
+                $this->info("Debug: Current model content:");
+                $this->line(File::get($modelPath));
+            }
+            
             // Automatically add the trait without asking
             if ($this->addTraitToModel($modelClass)) {
                 $this->info("✅ Successfully added HasEncryptedFields trait to {$modelClass}");
                 
-                // Need to clear the class cache to reload traits
+                // Show updated content if debug
+                if ($this->option('debug')) {
+                    $reflection = new \ReflectionClass($modelClass);
+                    $modelPath = $reflection->getFileName();
+                    $this->info("Debug: Updated model content:");
+                    $this->line(File::get($modelPath));
+                }
+                
+                // Clear class cache
                 $this->clearClassCache($modelClass);
                 
-                // Reload the model to get updated traits
+                // Force a fresh instance of the model
+                $this->info("🔄 Reloading model...");
+                
+                // Unset the class from memory
+                $this->unsetClass($modelClass);
+                
+                // Check if the class exists again
+                if (!class_exists($modelClass)) {
+                    $this->error("Model class disappeared after modification!");
+                    return;
+                }
+                
+                // Create fresh instance
                 $model = new $modelClass;
                 $traits = class_uses($model);
                 
+                if ($this->option('debug')) {
+                    $this->info("Debug: Traits after reload: " . implode(', ', $traits));
+                }
+                
                 if (!in_array($traitName, $traits)) {
                     $this->error("Failed to add HasEncryptedFields trait to {$modelClass}");
-                    $this->line("Please add this to your model manually:");
+                    $this->line("The trait was added but not detected. This might be a caching issue.");
+                    $this->line("Please restart your console and try again, or add manually:");
                     $this->line("use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;");
                     $this->line("use HasEncryptedFields;");
                     $this->line("protected static \$encryptedFields = ['email', 'phone'];");
                     $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
+                    
+                    // Check if file was modified correctly
+                    $reflection = new \ReflectionClass($modelClass);
+                    $modelPath = $reflection->getFileName();
+                    $content = File::get($modelPath);
+                    
+                    $this->info("\n📄 Current model file content:");
+                    $this->line($content);
                     return;
                 }
             } else {
@@ -181,11 +228,20 @@ class EncryptDataCommand extends Command
             
             $content = File::get($modelPath);
             
-            // Add the trait import at the top
+            // Check if already has the complete setup
+            $hasTraitImport = str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
+            $hasTraitUsage = str_contains($content, 'use HasEncryptedFields;');
+            $hasEncryptedFields = str_contains($content, 'protected static $encryptedFields');
+            
+            if ($hasTraitImport && $hasTraitUsage && $hasEncryptedFields) {
+                $this->info("Debug: Model already has complete setup");
+                return true;
+            }
+            
+            // Add the trait import at the top after namespace
             $traitImport = 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;';
             
-            // Check if already has trait import
-            if (!str_contains($content, $traitImport)) {
+            if (!$hasTraitImport) {
                 // Add after namespace
                 if (str_contains($content, 'namespace ')) {
                     $content = preg_replace(
@@ -204,16 +260,14 @@ class EncryptDataCommand extends Command
             }
             
             // Add the trait usage inside the class
-            $traitUsage = 'use HasEncryptedFields;';
-            
-            if (!str_contains($content, $traitUsage)) {
+            if (!$hasTraitUsage) {
                 // Find the class definition
                 if (preg_match('/(class\s+\w+\s+extends\s+[^{]+{)/', $content, $matches)) {
                     $classStart = $matches[1];
                     // Add trait usage after class opening brace
                     $content = str_replace(
                         $classStart,
-                        $classStart . "\n    {$traitUsage}",
+                        $classStart . "\n    use HasEncryptedFields;",
                         $content
                     );
                 } else {
@@ -222,7 +276,7 @@ class EncryptDataCommand extends Command
                         $classStart = $matches[1];
                         $content = str_replace(
                             $classStart,
-                            $classStart . "\n    {$traitUsage}",
+                            $classStart . "\n    use HasEncryptedFields;",
                             $content
                         );
                     }
@@ -230,14 +284,14 @@ class EncryptDataCommand extends Command
             }
             
             // Add encrypted fields properties
-            $properties = "\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
-            
-            if (!str_contains($content, 'protected static $encryptedFields')) {
+            if (!$hasEncryptedFields) {
+                $properties = "\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
+                
                 // Find where to insert - after trait usage if it exists
-                if (str_contains($content, $traitUsage)) {
+                if (str_contains($content, 'use HasEncryptedFields;')) {
                     $content = str_replace(
-                        $traitUsage,
-                        $traitUsage . $properties,
+                        'use HasEncryptedFields;',
+                        'use HasEncryptedFields;' . $properties,
                         $content
                     );
                 } else {
@@ -293,6 +347,21 @@ class EncryptDataCommand extends Command
         // Clear Laravel's class loader cache
         if (app()->bound('cache')) {
             app('cache')->forget('class-trait-map-' . $modelClass);
+        }
+    }
+    
+    /**
+     * Unset class from memory
+     */
+    protected function unsetClass(string $modelClass)
+    {
+        // This is a hack to force PHP to reload the class
+        $reflection = new \ReflectionClass($modelClass);
+        $modelPath = $reflection->getFileName();
+        
+        // Include the file again to force reload
+        if (File::exists($modelPath)) {
+            include_once $modelPath;
         }
     }
     
