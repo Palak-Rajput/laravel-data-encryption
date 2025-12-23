@@ -15,11 +15,17 @@ trait HasEncryptedFields
             $model->encryptFields();
         });
 
-        static::retrieved(function ($model) {
-            // Don't automatically decrypt on model retrieval
-            // This causes issues with authentication
-            // Decryption should be handled on-demand
-        });
+        // In HasEncryptedFields trait, modify the retrieved event:
+static::retrieved(function ($model) {
+    // Check if this is an authentication request
+    $isAuthRequest = request()->is('login', 'api/login', 'password/*') || 
+                     request()->routeIs('login') ||
+                     (request()->has('email') && request()->has('password'));
+    
+    if (!$isAuthRequest) {
+        $model->decryptFields();
+    }
+});
 
         static::created(function ($model) {
             $model->indexToMeilisearch();
@@ -32,61 +38,6 @@ trait HasEncryptedFields
         static::deleted(function ($model) {
             $model->removeFromMeilisearch();
         });
-        
-        // Add global scope to handle encrypted email queries
-        static::addGlobalScope('encrypted_email', function (Builder $builder) {
-            // We'll handle this in the resolveRouteBinding and specific query methods
-        });
-    }
-    
-    /**
-     * Method to find user by email for authentication
-     */
-    public static function findByEmailForAuth($email)
-    {
-        $hashedEmail = hash('sha256', 'laravel-data-encryption' . $email);
-        return static::where('email_hash', $hashedEmail)->first();
-    }
-    
-    /**
-     * Override the default resolveRouteBinding to handle encrypted email
-     */
-    public function resolveRouteBinding($value, $field = null)
-    {
-        if ($field === 'email') {
-            $hashedEmail = hash('sha256', 'laravel-data-encryption' . $value);
-            return $this->where('email_hash', $hashedEmail)->first();
-        }
-        
-        return parent::resolveRouteBinding($value, $field);
-    }
-    
-    /**
-     * Get decrypted email value
-     */
-    public function getDecryptedEmailAttribute()
-    {
-        if (!empty($this->attributes['email']) && $this->isEncrypted($this->attributes['email'])) {
-            try {
-                return Crypt::decryptString($this->attributes['email']);
-            } catch (\Exception $e) {
-                return null;
-            }
-        }
-        return $this->attributes['email'] ?? null;
-    }
-    
-    /**
-     * Scope for finding by email
-     */
-    public function scopeWhereEmail($query, $email)
-    {
-        if (in_array('email', static::$encryptedFields ?? [])) {
-            $hashedEmail = hash('sha256', 'laravel-data-encryption' . $email);
-            return $query->where('email_hash', $hashedEmail);
-        }
-        
-        return $query->where('email', $email);
     }
 
     public function indexToMeilisearch()
@@ -108,13 +59,10 @@ trait HasEncryptedFields
 
     public function getSearchableDocument(): array
     {
-        // Get decrypted email for search indexing
-        $decryptedEmail = $this->decrypted_email;
-        
         $document = [
             'id' => (string) $this->getKey(),
             'name' => $this->name ?? null,
-            'email' => $decryptedEmail,
+            'email' => $this->email ?? null,
             'created_at' => $this->created_at ? $this->created_at->timestamp : null,
         ];
 
@@ -128,8 +76,8 @@ trait HasEncryptedFields
         }
 
         // Extract email parts for search
-        if (!empty($decryptedEmail)) {
-            $document['email_parts'] = $this->extractEmailPartsForSearch($decryptedEmail);
+        if (!empty($this->email)) {
+            $document['email_parts'] = $this->extractEmailPartsForSearch($this->email);
         }
 
         return array_filter($document, function($value) {
@@ -146,17 +94,21 @@ trait HasEncryptedFields
             return $parts;
         }
 
+        // Always add the full email
         $parts[] = $email;
         
+        // Extract local part and domain
         if (str_contains($email, '@')) {
             list($localPart, $domain) = explode('@', $email, 2);
             
+            // Add main parts
             $parts[] = $localPart;
             $parts[] = $domain;
             
+            // Add domain without TLD
             $domainParts = explode('.', $domain);
             if (count($domainParts) > 1) {
-                $parts[] = $domainParts[0];
+                $parts[] = $domainParts[0]; // "gmail", "yahoo", etc.
             }
         }
         
@@ -214,6 +166,7 @@ trait HasEncryptedFields
     {
         $model = new static();
         
+        // Try Meilisearch first
         if (config('data-encryption.meilisearch.enabled', true)) {
             try {
                 $meilisearch = new \Meilisearch\Client('http://localhost:7700');
@@ -228,17 +181,21 @@ trait HasEncryptedFields
                     return static::whereIn($model->getKeyName(), $ids);
                 }
             } catch (\Exception $e) {
+                // Fall back to database search
                 Log::info('Meilisearch search failed, using database fallback: ' . $e->getMessage());
             }
         }
         
+        // Database fallback
         return static::where(function ($q) use ($query) {
+            // Hash search
             $hashedQuery = hash('sha256', 'laravel-data-encryption' . $query);
             
             foreach (static::$searchableHashFields ?? [] as $field) {
                 $q->orWhere($field . '_hash', $hashedQuery);
             }
             
+            // Name search
             $q->orWhere('name', 'like', "%{$query}%");
         });
     }
