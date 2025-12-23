@@ -160,22 +160,73 @@ class DataEncryptionServiceProvider extends ServiceProvider
     /**
      * Publish migrations with compatibility
      */
-    private function publishMigrations()
-    {
-        $migrationsPath = __DIR__.'/../../database/migrations';
-        
-        if (!file_exists($migrationsPath)) {
-            return;
-        }
-        
-        $timestamp = date('Y_m_d_His');
-        
-        $this->publishes([
-            // Main migration
-            $migrationsPath . '/add_hash_columns_to_users_table.php' => 
-                database_path("migrations/{$timestamp}_add_hash_columns_to_users_table.php"),
-        ], 'migrations');
+   private function publishMigrations()
+{
+    $migrationsPath = __DIR__.'/../../database/migrations';
+    
+    if (!file_exists($migrationsPath)) {
+        // Create the directory if it doesn't exist
+        mkdir($migrationsPath, 0755, true);
     }
+    
+    $migrationFile = 'add_hash_columns_to_users_table.php';
+    
+    if (!file_exists($migrationsPath . '/' . $migrationFile)) {
+        // Create a default migration file if it doesn't exist
+        $this->createDefaultMigration($migrationsPath . '/' . $migrationFile);
+    }
+    
+    $timestamp = date('Y_m_d_His');
+    
+    $this->publishes([
+        $migrationsPath . '/' . $migrationFile => 
+            database_path("migrations/{$timestamp}_add_hash_columns_to_users_table.php"),
+    ], 'migrations');
+}
+
+private function createDefaultMigration($filePath)
+{
+    $migrationContent = '<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up()
+    {
+        Schema::table("users", function (Blueprint $table) {
+            // Add hash columns for encrypted fields
+            $columnsToAdd = ["email", "phone", "ssn", "tax_id", "passport"];
+            
+            foreach ($columnsToAdd as $column) {
+                if (Schema::hasColumn("users", $column)) {
+                    $table->string($column . "_hash", 64)
+                           ->nullable()
+                           ->index()
+                           ->after($column);
+                }
+            }
+        });
+    }
+
+    public function down()
+    {
+        Schema::table("users", function (Blueprint $table) {
+            $columnsToDrop = ["email", "phone", "ssn", "tax_id", "passport"];
+            
+            foreach ($columnsToDrop as $column) {
+                if (Schema::hasColumn("users", $column . "_hash")) {
+                    $table->dropColumn($column . "_hash");
+                }
+            }
+        });
+    }
+};';
+
+    file_put_contents($filePath, $migrationContent);
+}
 
     /**
      * Auto-configure models based on Laravel version

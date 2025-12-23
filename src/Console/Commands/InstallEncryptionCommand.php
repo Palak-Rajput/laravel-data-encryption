@@ -43,13 +43,9 @@ class InstallEncryptionCommand extends Command
             '--force' => true
         ]);
         
-        // Step 2: Publish migrations
+        // Step 2: Create and publish migrations
         $this->info('📊 Publishing migrations...');
-        $this->call('vendor:publish', [
-            '--provider' => 'PalakRajput\\DataEncryption\\Providers\\DataEncryptionServiceProvider',
-            '--tag' => 'migrations',
-            '--force' => true
-        ]);
+        $this->createAndPublishMigrations();
         
         // Step 3: Add environment variables
         $this->info('🔧 Setting up environment...');
@@ -77,147 +73,245 @@ class InstallEncryptionCommand extends Command
         }
     }
     
-
-protected function autoSetupModels($skipConfirm = false)
-{
-    $this->info('🤖 Auto-configuring models...');
-
-    if (!class_exists('App\Models\User')) {
-        $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
-        return;
+    /**
+     * Create migration file if it doesn't exist and publish it
+     */
+    protected function createAndPublishMigrations()
+    {
+        // First, ensure the migration exists in the package
+        $this->createMigrationIfMissing();
+        
+        // Now publish it
+        $this->call('vendor:publish', [
+            '--provider' => 'PalakRajput\\DataEncryption\\Providers\\DataEncryptionServiceProvider',
+            '--tag' => 'migrations',
+            '--force' => true
+        ]);
+        
+        $this->info('✅ Migration published successfully');
     }
-
-    // 1️⃣ Ensure trait & properties exist
-    $this->setupUserModel();
-
-    if (!($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true)))) {
-        return;
-    }
-
-    $backup = $this->option('backup') ? true : false;
-
-    /*
-    |--------------------------------------------------------------------------
-    | STEP 1: Initialize Meilisearch index FIRST
-    |--------------------------------------------------------------------------
-    */
-    $this->info('🔧 Initializing Meilisearch index...');
-
-    $meilisearch = app(\PalakRajput\DataEncryption\Services\MeilisearchService::class);
-    $model       = new \App\Models\User();
-    $indexName   = $model->getMeilisearchIndexName();
-
-    if (!$meilisearch->initializeIndex($indexName)) {
-        $this->error("❌ Failed to initialize Meilisearch index: {$indexName}");
-        return;
-    }
-
-    $this->info("✅ Meilisearch index '{$indexName}' initialized");
-
-    /*
-    |--------------------------------------------------------------------------
-    | STEP 2: Encrypt existing data
-    |--------------------------------------------------------------------------
-    */
-    $this->info('🔐 Encrypting User data...');
-
-    $this->call('data-encryption:encrypt', [
-        '--model'  => 'App\Models\User',
-        '--backup' => $backup,
-        '--chunk'  => 1000,
-        '--force'  => true,
-    ]);
-
-    /*
-    |--------------------------------------------------------------------------
-    | STEP 3: Reindex encrypted data
-    |--------------------------------------------------------------------------
-    */
-    $this->info('🔍 Reindexing encrypted data to Meilisearch...');
-
-    $this->call('data-encryption:reindex', [
-        '--model' => 'App\Models\User',
-        '--force' => true,
-    ]);
-
-    /*
-    |--------------------------------------------------------------------------
-    | DONE
-    |--------------------------------------------------------------------------
-    */
-    $this->info('✅ Setup complete! Partial search is now enabled.');
-    $this->info('💡 Try searching for: gmail, user, @example.com');
-}
-
     
- protected function setupUserModel()
+    /**
+     * Create migration file in vendor directory if it doesn't exist
+     */
+    protected function createMigrationIfMissing()
+    {
+        $vendorDir = base_path('vendor/palak-rajput/laravel-data-encryption');
+        
+        // Check if package is installed via composer
+        if (!File::exists($vendorDir)) {
+            // Try to find it in a different location
+            $vendorDir = base_path('vendor/palak-rajput/laravel-data-encryption');
+            
+            if (!File::exists($vendorDir)) {
+                $this->warn('⚠️  Package not found in vendor directory. Using direct migration creation.');
+                $this->createMigrationDirectly();
+                return;
+            }
+        }
+        
+        // Create database/migrations directory if it doesn't exist
+        $migrationsDir = $vendorDir . '/database/migrations';
+        if (!File::exists($migrationsDir)) {
+            File::makeDirectory($migrationsDir, 0755, true);
+        }
+        
+        $migrationFile = $migrationsDir . '/add_hash_columns_to_users_table.php';
+        
+        if (!File::exists($migrationFile)) {
+            $this->createMigrationFile($migrationFile);
+            $this->info('✅ Created missing migration file in package');
+        }
+    }
+    
+    /**
+     * Create migration file directly in the project if package not found
+     */
+    protected function createMigrationDirectly()
+    {
+        $timestamp = date('Y_m_d_His');
+        $migrationFile = database_path("migrations/{$timestamp}_add_hash_columns_to_users_table.php");
+        
+        if (!File::exists($migrationFile)) {
+            $this->createMigrationFile($migrationFile);
+            $this->info('✅ Created migration file directly in project');
+        }
+    }
+    
+    /**
+     * Create the migration file content
+     */
+    protected function createMigrationFile($filePath)
+    {
+        $content = '<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
 {
-    $userModelPath = app_path('Models/User.php');
-
-    if (!File::exists($userModelPath)) {
-        $this->warn('⚠️  User model not found at: ' . $userModelPath);
-        return;
+    public function up()
+    {
+        Schema::table(\'users\', function (Blueprint $table) {
+            // Add hash columns for encrypted fields
+            $columns = [\'email\', \'phone\'];
+            
+            foreach ($columns as $column) {
+                if (Schema::hasColumn(\'users\', $column)) {
+                    // Add hash column for searching
+                    $table->string($column . \'_hash\', 64)
+                           ->nullable()
+                           ->index()
+                           ->after($column);
+                    
+                    // Add backup column if requested
+                    if (config(\'data-encryption.migration.backup_columns\', false)) {
+                        $table->string($column . \'_backup\', 255)
+                               ->nullable()
+                               ->after($column . \'_hash\');
+                    }
+                }
+            }
+        });
     }
 
-    $content = File::get($userModelPath);
-
-    // Add trait import if missing
-    if (!str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;')) {
-        $content = preg_replace(
-            '/^(namespace App\\\\Models;)/m',
-            "$1\n\nuse PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;",
-            $content
-        );
+    public function down()
+    {
+        Schema::table(\'users\', function (Blueprint $table) {
+            $columns = [\'email\', \'phone\'];
+            
+            foreach ($columns as $column) {
+                if (Schema::hasColumn(\'users\', $column . \'_hash\')) {
+                    $table->dropColumn($column . \'_hash\');
+                }
+                
+                if (Schema::hasColumn(\'users\', $column . \'_backup\')) {
+                    $table->dropColumn($column . \'_backup\');
+                }
+            }
+        });
     }
-
-    // Add trait inside class if missing
-    if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
-        $content = preg_replace(
-            '/(class User extends [^{]+\{)/',
-            "$1\n    use HasEncryptedFields;",
-            $content
-        );
+};';
+        
+        File::put($filePath, $content);
     }
+    
+    protected function autoSetupModels($skipConfirm = false)
+    {
+        $this->info('🤖 Auto-configuring models...');
 
-    // Add encrypted fields properties if missing
-    if (!str_contains($content, 'protected static $encryptedFields') &&
-        !str_contains($content, 'protected static $searchableHashFields')) {
+        if (!class_exists('App\Models\User')) {
+            $this->warn('⚠️  User model not found. You need to add HasEncryptedFields trait manually.');
+            return;
+        }
 
-        $content = preg_replace(
-            '/(class User extends [^{]+\{)/',
-            "$1\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];",
-            $content,
-            1
-        );
+        // 1️⃣ Ensure trait & properties exist
+        $this->setupUserModel();
+
+        if (!($this->option('auto') || ($skipConfirm && $this->confirm('Encrypt existing User data now?', true)))) {
+            return;
+        }
+
+        $backup = $this->option('backup') ? true : false;
+
+        /*
+        |--------------------------------------------------------------------------
+        | STEP 1: Initialize Meilisearch index FIRST
+        |--------------------------------------------------------------------------
+        */
+        $this->info('🔧 Initializing Meilisearch index...');
+
+        $meilisearch = app(\PalakRajput\DataEncryption\Services\MeilisearchService::class);
+        $model       = new \App\Models\User();
+        $indexName   = $model->getMeilisearchIndexName();
+
+        if (!$meilisearch->initializeIndex($indexName)) {
+            $this->error("❌ Failed to initialize Meilisearch index: {$indexName}");
+            return;
+        }
+
+        $this->info("✅ Meilisearch index '{$indexName}' initialized");
+
+        /*
+        |--------------------------------------------------------------------------
+        | STEP 2: Encrypt existing data
+        |--------------------------------------------------------------------------
+        */
+        $this->info('🔐 Encrypting User data...');
+
+        $this->call('data-encryption:encrypt', [
+            '--model'  => 'App\Models\User',
+            '--backup' => $backup,
+            '--chunk'  => 1000,
+            '--force'  => true,
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | STEP 3: Reindex encrypted data
+        |--------------------------------------------------------------------------
+        */
+        $this->info('🔍 Reindexing encrypted data to Meilisearch...');
+
+        $this->call('data-encryption:reindex', [
+            '--model' => 'App\Models\User',
+            '--force' => true,
+        ]);
+
+        /*
+        |--------------------------------------------------------------------------
+        | DONE
+        |--------------------------------------------------------------------------
+        */
+        $this->info('✅ Setup complete! Partial search is now enabled.');
+        $this->info('💡 Try searching for: gmail, user, @example.com');
     }
+    
+    protected function setupUserModel()
+    {
+        $userModelPath = app_path('Models/User.php');
 
-    File::put($userModelPath, $content);
-    $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
-}
+        if (!File::exists($userModelPath)) {
+            $this->warn('⚠️  User model not found at: ' . $userModelPath);
+            return;
+        }
 
+        $content = File::get($userModelPath);
 
-protected function addPropertiesToUserModel(&$content, $filePath)
-{
-    // Only add if properties are missing
-    if (str_contains($content, 'protected static $encryptedFields') &&
-        str_contains($content, 'protected static $searchableHashFields')) {
-        return;
+        // Add trait import if missing
+        if (!str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;')) {
+            $content = preg_replace(
+                '/^(namespace App\\\\Models;)/m',
+                "$1\n\nuse PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;",
+                $content
+            );
+        }
+
+        // Add trait inside class if missing
+        if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
+            $content = preg_replace(
+                '/(class User extends [^{]+\{)/',
+                "$1\n    use HasEncryptedFields;",
+                $content
+            );
+        }
+
+        // Add encrypted fields properties if missing
+        if (!str_contains($content, 'protected static $encryptedFields') &&
+            !str_contains($content, 'protected static $searchableHashFields')) {
+
+            $content = preg_replace(
+                '/(class User extends [^{]+\{)/',
+                "$1\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];",
+                $content,
+                1
+            );
+        }
+
+        File::put($userModelPath, $content);
+        $this->info('✅ Updated User model with HasEncryptedFields trait and properties');
     }
-
-    // Insert properties **inside the class**, after "use HasEncryptedFields;"
-    $content = preg_replace_callback(
-        '/(class\s+\w+\s+extends\s+[^{]+\{)/',
-        function ($matches) {
-            return $matches[1] . "\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
-        },
-        $content,
-        1
-    );
-
-    File::put($filePath, $content);
-}
-
-
     
     protected function addEnvironmentVariables()
     {
@@ -273,95 +367,93 @@ protected function addPropertiesToUserModel(&$content, $filePath)
         }
     }
     
- protected function setupMeilisearch()
-{
-    $this->info('📊 Setting up Meilisearch...');
+    protected function setupMeilisearch()
+    {
+        $this->info('📊 Setting up Meilisearch...');
 
-    $host = env('MEILISEARCH_HOST', 'http://127.0.0.1:7700');
-    $this->line("Meilisearch host: {$host}");
+        $host = env('MEILISEARCH_HOST', 'http://127.0.0.1:7700');
+        $this->line("Meilisearch host: {$host}");
 
-    // Package-specific data directory (VERY IMPORTANT)
-    $dataDir = storage_path('data-encryption/meilisearch');
+        // Package-specific data directory (VERY IMPORTANT)
+        $dataDir = storage_path('data-encryption/meilisearch');
 
-    if (!is_dir($dataDir)) {
-        mkdir($dataDir, 0755, true);
-    }
-
-    // 1️⃣ Check if already running
-    try {
-        $client = new \Meilisearch\Client($host);
-        $client->health();
-        $this->info('✅ Meilisearch is already running');
-        return;
-    } catch (\Throwable $e) {
-        $this->warn('⚠️  Meilisearch not running. Installing...');
-    }
-
-    // 2️⃣ Detect OS
-    $os = PHP_OS_FAMILY;
-
-    $binaries = [
-        'Windows' => [
-            'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-windows-amd64.exe',
-            'file' => 'meilisearch.exe',
-        ],
-        'Linux' => [
-            'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-linux-amd64',
-            'file' => 'meilisearch',
-        ],
-        'Darwin' => [
-            'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-macos-amd64',
-            'file' => 'meilisearch',
-        ],
-    ];
-
-    if (!isset($binaries[$os])) {
-        $this->error("❌ Unsupported OS: {$os}");
-        return;
-    }
-
-    $binaryPath = base_path($binaries[$os]['file']);
-
-    // 3️⃣ Download binary if missing
-    if (!file_exists($binaryPath)) {
-        $this->info('⬇️ Downloading Meilisearch binary...');
-        file_put_contents($binaryPath, fopen($binaries[$os]['url'], 'r'));
-
-        if ($os !== 'Windows') {
-            chmod($binaryPath, 0755);
+        if (!is_dir($dataDir)) {
+            mkdir($dataDir, 0755, true);
         }
 
-        $this->info('✅ Meilisearch downloaded');
-    } else {
-        $this->info('ℹ️ Meilisearch binary already exists');
+        // 1️⃣ Check if already running
+        try {
+            $client = new \Meilisearch\Client($host);
+            $client->health();
+            $this->info('✅ Meilisearch is already running');
+            return;
+        } catch (\Throwable $e) {
+            $this->warn('⚠️  Meilisearch not running. Installing...');
+        }
+
+        // 2️⃣ Detect OS
+        $os = PHP_OS_FAMILY;
+
+        $binaries = [
+            'Windows' => [
+                'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-windows-amd64.exe',
+                'file' => 'meilisearch.exe',
+            ],
+            'Linux' => [
+                'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-linux-amd64',
+                'file' => 'meilisearch',
+            ],
+            'Darwin' => [
+                'url' => 'https://github.com/meilisearch/meilisearch/releases/latest/download/meilisearch-macos-amd64',
+                'file' => 'meilisearch',
+            ],
+        ];
+
+        if (!isset($binaries[$os])) {
+            $this->error("❌ Unsupported OS: {$os}");
+            return;
+        }
+
+        $binaryPath = base_path($binaries[$os]['file']);
+
+        // 3️⃣ Download binary if missing
+        if (!file_exists($binaryPath)) {
+            $this->info('⬇️ Downloading Meilisearch binary...');
+            file_put_contents($binaryPath, fopen($binaries[$os]['url'], 'r'));
+
+            if ($os !== 'Windows') {
+                chmod($binaryPath, 0755);
+            }
+
+            $this->info('✅ Meilisearch downloaded');
+        } else {
+            $this->info('ℹ️ Meilisearch binary already exists');
+        }
+
+        // 4️⃣ Start Meilisearch WITH CUSTOM DATA DIR
+        $this->info('🚀 Starting Meilisearch server...');
+
+        $command = "\"{$binaryPath}\" --db-path=\"{$dataDir}\"";
+
+        if ($os === 'Windows') {
+            pclose(popen("start /B \"Meilisearch\" {$command}", 'r'));
+        } else {
+            exec($command . ' > /dev/null 2>&1 &');
+        }
+
+        // 5️⃣ Wait & verify
+        sleep(3);
+
+        try {
+            $client = new \Meilisearch\Client($host);
+            $client->health();
+            $this->info('✅ Meilisearch started successfully');
+            $this->line("📂 Data directory: {$dataDir}");
+        } catch (\Throwable $e) {
+            $this->error('❌ Failed to start Meilisearch');
+            $this->warn('👉 If this persists, delete: ' . $dataDir);
+        }
     }
-
-    // 4️⃣ Start Meilisearch WITH CUSTOM DATA DIR
-    $this->info('🚀 Starting Meilisearch server...');
-
-    $command = "\"{$binaryPath}\" --db-path=\"{$dataDir}\"";
-
-    if ($os === 'Windows') {
-        pclose(popen("start /B \"Meilisearch\" {$command}", 'r'));
-    } else {
-        exec($command . ' > /dev/null 2>&1 &');
-    }
-
-    // 5️⃣ Wait & verify
-    sleep(3);
-
-    try {
-        $client = new \Meilisearch\Client($host);
-        $client->health();
-        $this->info('✅ Meilisearch started successfully');
-        $this->line("📂 Data directory: {$dataDir}");
-    } catch (\Throwable $e) {
-        $this->error('❌ Failed to start Meilisearch');
-        $this->warn('👉 If this persists, delete: ' . $dataDir);
-    }
-}
-
-
     
     protected function showNextSteps()
     {
@@ -401,5 +493,4 @@ protected function addPropertiesToUserModel(&$content, $filePath)
         
         $this->info('💡 For automatic setup, run: php artisan data-encryption:install --auto');
     }
-    
 }
