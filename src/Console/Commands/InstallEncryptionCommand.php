@@ -401,5 +401,48 @@ protected function addPropertiesToUserModel(&$content, $filePath)
         
         $this->info('💡 For automatic setup, run: php artisan data-encryption:install --auto');
     }
+    /**
+ * Check if hash columns exist for a model
+ */
+private function hashColumnsExist($model): bool
+{
+    try {
+        $table = $model->getTable();
+        $columns = \Illuminate\Support\Facades\Schema::getColumnListing($table);
+        
+        // Get encrypted fields for this model
+        $encryptedFields = config("data-encryption.encrypted_fields.{$model::class}", []);
+        
+        foreach ($encryptedFields as $field) {
+            $hashColumn = $field . '_hash';
+            if (!in_array($hashColumn, $columns)) {
+                return false;
+            }
+        }
+        
+        return true;
+    } catch (\Exception $e) {
+        return false;
+    }
+}
+
+// Then update the encryption section in your command:
+private function encryptData($modelClass)
+{
+    try {
+        $model = app($modelClass);
+        
+        // Check if hash columns exist before encrypting
+        if (!$this->hashColumnsExist($model)) {
+            $this->error("Hash columns do not exist for {$modelClass}. Please run migrations first!");
+            $this->line("Run: php artisan migrate");
+            return;
+        }
+        
+        // ... rest of your existing code
+    } catch (\Exception $e) {
+        $this->error("Failed to encrypt data for {$modelClass}: " . $e->getMessage());
+    }
+}
     
 }

@@ -322,32 +322,194 @@ class DataEncryptionServiceProvider extends ServiceProvider
     /**
  * Publish migrations with compatibility
  */
+/**
+ * Publish migrations with compatibility
+ */
 private function publishMigrations()
 {
-    // Correct path to migrations directory
-    $migrationsPath = dirname(__DIR__, 2) . '/database/migrations';
+    // Get the vendor path where your package is installed
+    $vendorPath = base_path('vendor/palak-rajput/laravel-data-encryption');
     
+    // Check if the package exists in vendor
+    if (!file_exists($vendorPath)) {
+        // Alternative: Use relative path from the provider
+        $vendorPath = dirname(__DIR__, 2); // Go up from src/Providers to package root
+    }
+    
+    $migrationsPath = $vendorPath . '/database/migrations';
+    
+    // If migrations directory doesn't exist in the package, create it
     if (!file_exists($migrationsPath)) {
-        // Create migrations directory if it doesn't exist
         if (!mkdir($migrationsPath, 0755, true) && !is_dir($migrationsPath)) {
             throw new \RuntimeException(sprintf('Directory "%s" was not created', $migrationsPath));
         }
         
-        // Create the migration file if it doesn't exist
-        $migrationFile = $migrationsPath . '/add_hash_columns_to_all_tables.php';
-        if (!file_exists($migrationFile)) {
-            $stub = file_get_contents(__DIR__ . '/../Stubs/migration.stub');
-            file_put_contents($migrationFile, $stub);
-        }
+        // Create the migration file
+        $this->createMigrationFile($migrationsPath);
+    }
+    
+    // Check if the specific migration file exists
+    $migrationFile = $migrationsPath . '/add_hash_columns_to_all_tables.php';
+    if (!file_exists($migrationFile)) {
+        $this->createMigrationFile($migrationsPath);
     }
     
     $timestamp = date('Y_m_d_His');
     
     $this->publishes([
-        // Main migration - now creates hash columns for all tables
-        $migrationsPath . '/add_hash_columns_to_all_tables.php' => 
-            database_path("migrations/{$timestamp}_add_hash_columns_to_all_tables.php"),
+        $migrationFile => database_path("migrations/{$timestamp}_add_hash_columns_to_all_tables.php"),
     ], 'migrations');
+}
+
+/**
+ * Create migration file in the specified directory
+ */
+private function createMigrationFile(string $migrationsPath): void
+{
+    $migrationContent = <<<'PHP'
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
+
+class AddHashColumnsToAllTables extends Migration
+{
+    /**
+     * Check if a column name indicates sensitive data
+     */
+    private function isSensitiveColumn(string $columnName): bool
+    {
+        $columnLower = strtolower($columnName);
+        
+        $sensitivePatterns = [
+            'email', 'phone', 'mobile', 'telephone',
+            'ssn', 'social_security', 'tax_id',
+            'credit_card', 'card_number',
+            'passport', 'driver_license',
+        ];
+        
+        foreach ($sensitivePatterns as $pattern) {
+            if (str_contains($columnLower, $pattern)) {
+                return true;
+            }
+        }
+        
+        // Special patterns
+        if (preg_match('/^(email|e_mail|mail)$/i', $columnName)) {
+            return true;
+        }
+        
+        if (preg_match('/^(phone|mobile|tel|telephone|contact_number)$/i', $columnName)) {
+            return true;
+        }
+        
+        return false;
+    }
+
+    /**
+     * Run the migrations.
+     *
+     * @return void
+     */
+    public function up()
+    {
+        $connection = DB::getDefaultConnection();
+        
+        // Get all tables (method varies by database driver)
+        if ($connection === 'mysql') {
+            $tables = DB::select('SHOW TABLES');
+            $tables = array_map(function($table) {
+                return array_values((array)$table)[0];
+            }, $tables);
+        } elseif ($connection === 'pgsql') {
+            $tables = DB::select("SELECT tablename FROM pg_tables WHERE schemaname = 'public'");
+            $tables = array_map(function($table) {
+                return $table->tablename;
+            }, $tables);
+        } elseif ($connection === 'sqlite') {
+            $tables = DB::select("SELECT name FROM sqlite_master WHERE type='table'");
+            $tables = array_map(function($table) {
+                return $table->name;
+            }, $tables);
+        } else {
+            $tables = [];
+        }
+        
+        foreach ($tables as $tableName) {
+            // Skip migrations table and other system tables
+            if (in_array($tableName, ['migrations', 'password_reset_tokens', 'failed_jobs', 'personal_access_tokens', 'password_resets'])) {
+                continue;
+            }
+            
+            Schema::table($tableName, function (Blueprint $table) use ($tableName) {
+                // Get column list for this table
+                $columns = Schema::getColumnListing($tableName);
+                
+                foreach ($columns as $column) {
+                    if ($this->isSensitiveColumn($column)) {
+                        $hashColumn = $column . '_hash';
+                        
+                        // Add hash column if it doesn't exist
+                        if (!Schema::hasColumn($tableName, $hashColumn)) {
+                            $table->string($hashColumn, 64)->nullable()->index();
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    /**
+     * Reverse the migrations.
+     *
+     * @return void
+     */
+    public function down()
+    {
+        $connection = DB::getDefaultConnection();
+        
+        if ($connection === 'mysql') {
+            $tables = DB::select('SHOW TABLES');
+            $tables = array_map(function($table) {
+                return array_values((array)$table)[0];
+            }, $tables);
+        } elseif ($connection === 'pgsql') {
+            $tables = DB::select("SELECT tablename FROM pg_tables WHERE schemaname = 'public'");
+            $tables = array_map(function($table) {
+                return $table->tablename;
+            }, $tables);
+        } elseif ($connection === 'sqlite') {
+            $tables = DB::select("SELECT name FROM sqlite_master WHERE type='table'");
+            $tables = array_map(function($table) {
+                return $table->name;
+            }, $tables);
+        } else {
+            $tables = [];
+        }
+        
+        foreach ($tables as $tableName) {
+            Schema::table($tableName, function (Blueprint $table) use ($tableName) {
+                // Get column list for this table
+                $columns = Schema::getColumnListing($tableName);
+                
+                foreach ($columns as $column) {
+                    $hashColumn = $column . '_hash';
+                    
+                    // Remove hash column if it exists
+                    if (Schema::hasColumn($tableName, $hashColumn)) {
+                        $table->dropColumn($hashColumn);
+                    }
+                }
+            });
+        }
+    }
+}
+PHP;
+
+    $migrationFile = $migrationsPath . '/add_hash_columns_to_all_tables.php';
+    file_put_contents($migrationFile, $migrationContent);
 }
 
     /**
