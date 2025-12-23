@@ -203,151 +203,232 @@ class EncryptDataCommand extends Command
     /**
      * Add HasEncryptedFields trait to model
      */
-    protected function addHasEncryptedFieldsTrait($modelClass): bool
-    {
-        $modelPath = $this->getModelPath($modelClass);
+  /**
+ * Add HasEncryptedFields trait to model
+ */
+protected function addHasEncryptedFieldsTrait($modelClass): bool
+{
+    $modelPath = $this->getModelPath($modelClass);
+    
+    if (!$modelPath || !File::exists($modelPath)) {
+        $this->error("Could not find model file for: {$modelClass}");
+        return false;
+    }
+    
+    $content = File::get($modelPath);
+    $modelName = class_basename($modelClass);
+    
+    $originalContent = $content;
+    $changesMade = false;
+    
+    // 1. Add trait import if missing
+    $traitImport = 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;';
+    if (!str_contains($content, 'PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields')) {
+        // Find the right place to add the import (after namespace but before class)
+        $lines = explode("\n", $content);
+        $newLines = [];
+        $importAdded = false;
         
-        if (!$modelPath || !File::exists($modelPath)) {
-            $this->error("Could not find model file for: {$modelClass}");
-            return false;
-        }
-        
-        $content = File::get($modelPath);
-        $modelName = class_basename($modelClass);
-        
-        $changesMade = false;
-        
-        // Add trait import if missing
-        $traitImport = 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;';
-        if (!str_contains($content, $traitImport)) {
-            // Add after namespace
-            $content = preg_replace(
-                '/^(namespace .+;)/m',
-                "$1\n\n" . $traitImport,
-                $content
-            );
-            $changesMade = true;
-            $this->info("✅ Added trait import to {$modelName}");
-        }
-        
-        // Add trait inside class if missing
-        if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
-            // Find the class definition and add trait after opening brace
-            $pattern = '/(class\s+' . preg_quote($modelName) . '\s+.*\{)/';
-            if (preg_match($pattern, $content)) {
-                $content = preg_replace(
-                    $pattern,
-                    "$1\n    use HasEncryptedFields;",
-                    $content
-                );
-                $changesMade = true;
-                $this->info("✅ Added HasEncryptedFields trait to {$modelName}");
-            } else {
-                // Alternative pattern
-                $pattern = '/(class ' . preg_quote($modelName) . '.*\{)/';
-                $content = preg_replace(
-                    $pattern,
-                    "$1\n    use HasEncryptedFields;",
-                    $content
-                );
-                $changesMade = true;
-                $this->info("✅ Added HasEncryptedFields trait to {$modelName}");
+        foreach ($lines as $line) {
+            $newLines[] = $line;
+            
+            // Add import after the namespace or after last use statement
+            if (!$importAdded && (
+                str_contains($line, 'namespace ') || 
+                (str_contains($line, 'use ') && !str_contains($line, 'use PalakRajput\\DataEncryption'))
+            )) {
+                // Check if next line is also a use statement or empty line
+                $nextLine = next($lines) ?: '';
+                if (!str_contains($nextLine, 'use ') && !str_contains($nextLine, 'class ')) {
+                    $newLines[] = $traitImport;
+                    $importAdded = true;
+                    $changesMade = true;
+                }
             }
         }
         
-        if ($changesMade) {
-            File::put($modelPath, $content);
-            $this->info("✅ Updated {$modelName} model file");
+        if (!$importAdded) {
+            // If we couldn't find a good place, add it before the class
+            $content = preg_replace(
+                '/(class\s+' . preg_quote($modelName) . '\s+.*\{)/',
+                $traitImport . "\n\n$1",
+                $content
+            );
+            $changesMade = true;
+        } else {
+            $content = implode("\n", $newLines);
         }
+        
+        if ($changesMade) {
+            $this->info("✅ Added trait import to {$modelName}");
+        }
+    }
+    
+    // 2. Add trait inside class if missing
+    if (!preg_match('/use\s+HasEncryptedFields\s*;/', $content)) {
+        // Find class opening brace and add trait after it
+        $pattern = '/(class\s+' . preg_quote($modelName) . '\s+.*\n?\s*\{)/';
+        if (preg_match($pattern, $content, $matches)) {
+            // Get the class opening line
+            $classOpening = $matches[1];
+            
+            // Add trait after the opening brace
+            $replacement = $classOpening . "\n    use HasEncryptedFields;";
+            $content = preg_replace($pattern, $replacement, $content, 1);
+            
+            $changesMade = true;
+            $this->info("✅ Added HasEncryptedFields trait to {$modelName} class");
+        } else {
+            // Try alternative pattern
+            $pattern = '/(class ' . preg_quote($modelName) . '.*\{)/';
+            $content = preg_replace(
+                $pattern,
+                "$1\n    use HasEncryptedFields;",
+                $content
+            );
+            $changesMade = true;
+            $this->info("✅ Added HasEncryptedFields trait to {$modelName} class");
+        }
+    }
+    
+    // 3. Add encryptedFields property if missing
+    if (!str_contains($content, 'protected static $encryptedFields')) {
+        // Find where to add it (after the trait or at beginning of class)
+        if (preg_match('/(use HasEncryptedFields;\s*)/', $content, $matches)) {
+            // Add after the trait
+            $replacement = $matches[1] . "\n    protected static \$encryptedFields = ['email', 'phone'];";
+            $content = preg_replace('/(use HasEncryptedFields;\s*)/', $replacement, $content, 1);
+        } else {
+            // Add at beginning of class after opening brace
+            $pattern = '/(class\s+' . preg_quote($modelName) . '\s+.*\n?\s*\{)/';
+            if (preg_match($pattern, $content, $matches)) {
+                $replacement = $matches[1] . "\n    use HasEncryptedFields;\n    protected static \$encryptedFields = ['email', 'phone'];";
+                $content = preg_replace($pattern, $replacement, $content, 1);
+            }
+        }
+        $changesMade = true;
+        $this->info("✅ Added encryptedFields property to {$modelName}");
+    }
+    
+    // 4. Add searchableHashFields property if missing
+    if (!str_contains($content, 'protected static $searchableHashFields')) {
+        // Add it after encryptedFields property
+        $pattern = '/(protected static \$encryptedFields\s*=\s*\[.*?\];\s*)/s';
+        if (preg_match($pattern, $content, $matches)) {
+            $replacement = $matches[1] . "    protected static \$searchableHashFields = ['email', 'phone'];\n";
+            $content = preg_replace($pattern, $replacement, $content, 1);
+        } else {
+            // If pattern not found, add it after encryptedFields with any value
+            $pattern = '/(protected static \$encryptedFields.*?;\s*)/s';
+            if (preg_match($pattern, $content, $matches)) {
+                $replacement = $matches[1] . "    protected static \$searchableHashFields = ['email', 'phone'];\n";
+                $content = preg_replace($pattern, $replacement, $content, 1);
+            }
+        }
+        $changesMade = true;
+        $this->info("✅ Added searchableHashFields property to {$modelName}");
+    }
+    
+    if ($changesMade && $content !== $originalContent) {
+        File::put($modelPath, $content);
+        $this->info("✅ Successfully updated {$modelName} model");
+        
+        // Show what was added
+        $this->line("\n📄 Model {$modelName} now contains:");
+        $this->line("   - use PalakRajput\DataEncryption\Models\Trait\HasEncryptedFields;");
+        $this->line("   - use HasEncryptedFields; (inside class)");
+        $this->line("   - protected static \$encryptedFields = ['email', 'phone'];");
+        $this->line("   - protected static \$searchableHashFields = ['email', 'phone'];");
         
         return true;
     }
     
+    return true; // Return true even if no changes were needed
+}
+    
     /**
      * Update model with fields configuration
      */
-    protected function updateModelWithFields($modelClass, $fields, $searchableFields): bool
-    {
-        $modelPath = $this->getModelPath($modelClass);
-        
-        if (!$modelPath || !File::exists($modelPath)) {
-            $this->error("Could not find model file for: {$modelClass}");
-            return false;
-        }
-        
-        $content = File::get($modelPath);
-        $modelName = class_basename($modelClass);
-        
-        $fieldsStr = var_export($fields, true);
-        $searchableStr = var_export($searchableFields, true);
-        
-        $changesMade = false;
-        
-        // Add encryptedFields property
-        if (!str_contains($content, 'protected static $encryptedFields')) {
-            // Find where to add the property (after the trait)
-            $pattern = '/(use HasEncryptedFields;\s*)/';
-            if (preg_match($pattern, $content, $matches)) {
-                $replacement = $matches[1] . "\n    protected static \$encryptedFields = {$fieldsStr};";
-                $content = preg_replace($pattern, $replacement, $content, 1);
-                $changesMade = true;
-                $this->info("✅ Added encryptedFields to {$modelName}");
-            } else {
-                // If trait not found, add properties after class opening
-                $pattern = '/(class ' . preg_quote($modelName) . '.*\{)/';
-                if (preg_match($pattern, $content)) {
-                    $replacement = "$1\n    use HasEncryptedFields;\n    protected static \$encryptedFields = {$fieldsStr};";
-                    $content = preg_replace($pattern, $replacement, $content, 1);
-                    $changesMade = true;
-                    $this->info("✅ Added trait and encryptedFields to {$modelName}");
-                }
-            }
-        } else {
-            // Update existing property
-            $pattern = '/(protected static \$encryptedFields\s*=\s*)(\[.*?\])(\s*;)/s';
-            if (preg_match($pattern, $content)) {
-                $content = preg_replace($pattern, '$1' . $fieldsStr . '$3', $content);
+   /**
+ * Update model with fields configuration
+ */
+protected function updateModelWithFields($modelClass, $fields, $searchableFields): bool
+{
+    $modelPath = $this->getModelPath($modelClass);
+    
+    if (!$modelPath || !File::exists($modelPath)) {
+        $this->error("Could not find model file for: {$modelClass}");
+        return false;
+    }
+    
+    $content = File::get($modelPath);
+    $modelName = class_basename($modelClass);
+    
+    $fieldsStr = var_export($fields, true);
+    $searchableStr = var_export($searchableFields, true);
+    
+    $changesMade = false;
+    
+    // Update encryptedFields property
+    if (str_contains($content, 'protected static $encryptedFields')) {
+        $pattern = '/(protected static \$encryptedFields\s*=\s*)(\[.*?\])(\s*;)/s';
+        if (preg_match($pattern, $content)) {
+            $newContent = preg_replace($pattern, '$1' . $fieldsStr . '$3', $content);
+            if ($newContent !== $content) {
+                $content = $newContent;
                 $changesMade = true;
                 $this->info("✅ Updated encryptedFields for {$modelName}");
             }
         }
-        
-        // Add searchableHashFields property
-        if (!str_contains($content, 'protected static $searchableHashFields')) {
-            // Find encryptedFields property and add searchableHashFields after it
-            $pattern = '/(protected static \$encryptedFields\s*=\s*' . preg_quote($fieldsStr, '/') . '\s*;\s*)/';
-            if (preg_match($pattern, $content)) {
-                $replacement = "$1    protected static \$searchableHashFields = {$searchableStr};\n";
-                $content = preg_replace($pattern, $replacement, $content, 1);
-                $changesMade = true;
-                $this->info("✅ Added searchableHashFields to {$modelName}");
-            } else {
-                // If pattern not found, add it after encryptedFields with any value
-                $pattern = '/(protected static \$encryptedFields\s*=\s*)(\[.*?\])(\s*;)/s';
-                if (preg_match($pattern, $content, $matches)) {
-                    $replacement = $matches[0] . "\n    protected static \$searchableHashFields = {$searchableStr};";
-                    $content = preg_replace($pattern, $replacement, $content, 1);
-                    $changesMade = true;
-                    $this->info("✅ Added searchableHashFields to {$modelName}");
-                }
-            }
-        } else {
-            // Update existing property
-            $pattern = '/(protected static \$searchableHashFields\s*=\s*)(\[.*?\])(\s*;)/s';
-            if (preg_match($pattern, $content)) {
-                $content = preg_replace($pattern, '$1' . $searchableStr . '$3', $content);
+    } else {
+        // Add encryptedFields property if missing
+        if (preg_match('/(use HasEncryptedFields;\s*)/', $content, $matches)) {
+            $replacement = $matches[1] . "\n    protected static \$encryptedFields = {$fieldsStr};";
+            $content = preg_replace('/(use HasEncryptedFields;\s*)/', $replacement, $content, 1);
+            $changesMade = true;
+            $this->info("✅ Added encryptedFields to {$modelName}");
+        }
+    }
+    
+    // Update searchableHashFields property
+    if (str_contains($content, 'protected static $searchableHashFields')) {
+        $pattern = '/(protected static \$searchableHashFields\s*=\s*)(\[.*?\])(\s*;)/s';
+        if (preg_match($pattern, $content)) {
+            $newContent = preg_replace($pattern, '$1' . $searchableStr . '$3', $content);
+            if ($newContent !== $content) {
+                $content = $newContent;
                 $changesMade = true;
                 $this->info("✅ Updated searchableHashFields for {$modelName}");
             }
         }
-        
-        if ($changesMade) {
-            File::put($modelPath, $content);
-            $this->info("✅ Updated fields configuration in {$modelName}");
+    } else {
+        // Add searchableHashFields property if missing
+        $pattern = '/(protected static \$encryptedFields\s*=\s*' . preg_quote($fieldsStr, '/') . '\s*;\s*)/';
+        if (preg_match($pattern, $content)) {
+            $replacement = "$1    protected static \$searchableHashFields = {$searchableStr};\n";
+            $content = preg_replace($pattern, $replacement, $content, 1);
+            $changesMade = true;
+            $this->info("✅ Added searchableHashFields to {$modelName}");
+        } else {
+            // Try with any encryptedFields value
+            $pattern = '/(protected static \$encryptedFields.*?;\s*)/s';
+            if (preg_match($pattern, $content, $matches)) {
+                $replacement = $matches[1] . "    protected static \$searchableHashFields = {$searchableStr};\n";
+                $content = preg_replace($pattern, $replacement, $content, 1);
+                $changesMade = true;
+                $this->info("✅ Added searchableHashFields to {$modelName}");
+            }
         }
-        
+    }
+    
+    if ($changesMade) {
+        File::put($modelPath, $content);
+        $this->info("✅ Updated fields configuration in {$modelName}");
         return true;
     }
+    
+    return true;
+}
     
     /**
      * Ask user for fields to encrypt
