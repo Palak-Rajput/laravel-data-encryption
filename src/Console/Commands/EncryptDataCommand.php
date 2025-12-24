@@ -16,7 +16,7 @@ class EncryptDataCommand extends Command
     protected $signature = 'data-encryption:encrypt 
                         {model? : Model class to encrypt (e.g., App\Models\User)}
                         {--backup : Create backup before encryption}
-                        {--field= : Specific field to encrypt}
+                        {--fields= : Comma-separated list of fields to encrypt}
                         {--chunk=1000 : Number of records to process at once}
                         {--force : Skip confirmation prompts}
                         {--skip-migration : Skip creating migration for hash columns}';
@@ -51,19 +51,64 @@ class EncryptDataCommand extends Command
         $reflection = new \ReflectionClass($modelClass);
         $modelPath = $reflection->getFileName();
         
-        // STEP 1: Check and add HasEncryptedFields configuration if needed
+        // Get existing columns in the table
+        $existingColumns = Schema::getColumnListing($table);
+        $this->info("📊 Table '{$table}' has columns: " . implode(', ', $existingColumns));
+        
+        // STEP 1: Check if model has HasEncryptedFields configuration
         $content = File::get($modelPath);
         
         $hasTraitImport = str_contains($content, 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;');
         $hasTraitUsage = str_contains($content, 'use HasEncryptedFields;');
         $hasEncryptedFields = str_contains($content, 'protected static $encryptedFields');
         
-        // If any of these are missing, add them
+        // Get fields from option or ask user
+        $fieldsOption = $this->option('fields');
+        $selectedFields = [];
+        
+        if ($fieldsOption) {
+            $selectedFields = array_map('trim', explode(',', $fieldsOption));
+        } elseif (!$hasEncryptedFields) {
+            // Ask user to select fields
+            $this->info("\n📝 Select fields to encrypt (comma-separated):");
+            foreach ($existingColumns as $index => $column) {
+                $this->line("  [{$index}] {$column}");
+            }
+            
+            $fieldInput = $this->ask('Enter field numbers or names (e.g., 0,2,3 or email,phone):');
+            
+            if (is_numeric($fieldInput[0])) {
+                // User entered numbers
+                $indices = array_map('trim', explode(',', $fieldInput));
+                foreach ($indices as $index) {
+                    if (isset($existingColumns[$index])) {
+                        $selectedFields[] = $existingColumns[$index];
+                    }
+                }
+            } else {
+                // User entered names
+                $selectedFields = array_map('trim', explode(',', $fieldInput));
+            }
+            
+            // Filter only fields that exist in the table
+            $selectedFields = array_filter($selectedFields, function($field) use ($existingColumns) {
+                return in_array($field, $existingColumns);
+            });
+            
+            if (empty($selectedFields)) {
+                $this->error("No valid fields selected. Available fields: " . implode(', ', $existingColumns));
+                return;
+            }
+            
+            $this->info("✅ Selected fields: " . implode(', ', $selectedFields));
+        }
+        
+        // If any configuration is missing, add them
         if (!$hasTraitImport || !$hasTraitUsage || !$hasEncryptedFields) {
             $this->warn("⚠️ Model {$modelClass} is missing HasEncryptedFields configuration");
             $this->info("📝 Automatically adding HasEncryptedFields configuration to {$modelClass}...");
             
-            if ($this->addTraitToModel($modelClass)) {
+            if ($this->addTraitToModel($modelClass, $selectedFields)) {
                 $this->info("✅ Successfully added HasEncryptedFields configuration to {$modelClass}");
                 
                 // Clear cache
@@ -79,8 +124,8 @@ class EncryptDataCommand extends Command
                     $this->error("Failed to verify changes to {$modelClass}. Please add manually:");
                     $this->line("use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;");
                     $this->line("use HasEncryptedFields;");
-                    $this->line("protected static \$encryptedFields = ['email', 'phone'];");
-                    $this->line("protected static \$searchableHashFields = ['email', 'phone'];");
+                    $this->line("protected static \$encryptedFields = ['" . implode("', '", $selectedFields) . "'];");
+                    $this->line("protected static \$searchableHashFields = ['" . implode("', '", $selectedFields) . "'];");
                     return;
                 }
             } else {
@@ -102,8 +147,19 @@ class EncryptDataCommand extends Command
 
         $this->info("✅ Model configured with fields: " . implode(', ', $encryptedFields));
         
+        // Filter only fields that exist in the table
+        $encryptedFields = array_filter($encryptedFields, function($field) use ($existingColumns) {
+            return in_array($field, $existingColumns);
+        });
+        
+        if (empty($encryptedFields)) {
+            $this->warn("⚠️  Configured fields don't exist in table '{$table}'");
+            $this->line("Available fields: " . implode(', ', $existingColumns));
+            $this->line("Update encryptedFields in {$modelClass} to match table columns");
+            return;
+        }
+        
         // STEP 3: Check if hash columns exist, create migration if needed
-        $existingColumns = Schema::getColumnListing($table);
         $needsMigration = false;
         $hashColumnsToAdd = [];
         
@@ -156,12 +212,12 @@ class EncryptDataCommand extends Command
         }
         
         // STEP 5: Check if we can proceed with encryption
-        $fields = array_filter($encryptedFields, function($field) use ($existingColumns) {
+        $fieldsToEncrypt = array_filter($encryptedFields, function($field) use ($existingColumns) {
             $hashColumn = $field . '_hash';
             return in_array($field, $existingColumns) && in_array($hashColumn, $existingColumns);
         });
         
-        if (empty($fields)) {
+        if (empty($fieldsToEncrypt)) {
             $this->warn("⚠️  No fields to encrypt or missing hash columns");
             $this->line("Make sure hash columns exist for: " . implode(', ', $encryptedFields));
             $this->line("Run migrations first or use --skip-migration to skip hash column check");
@@ -184,8 +240,8 @@ class EncryptDataCommand extends Command
         }
         
         // STEP 8: Encrypt data
-        $this->info("Encrypting fields for {$modelClass}: " . implode(', ', $fields));
-        $this->encryptModelData($modelClass, $fields, $this->option('chunk'));
+        $this->info("Encrypting fields for {$modelClass}: " . implode(', ', $fieldsToEncrypt));
+        $this->encryptModelData($modelClass, $fieldsToEncrypt, $this->option('chunk'));
         
         $this->info('✅ Data encryption completed!');
         
@@ -241,9 +297,9 @@ class EncryptDataCommand extends Command
     }
     
     /**
-     * Add HasEncryptedFields trait to model
+     * Add HasEncryptedFields trait to model with custom fields
      */
-    protected function addTraitToModel(string $modelClass): bool
+    protected function addTraitToModel(string $modelClass, array $fields = null): bool
     {
         try {
             $reflection = new \ReflectionClass($modelClass);
@@ -257,14 +313,16 @@ class EncryptDataCommand extends Command
             $content = File::get($modelPath);
             $originalContent = $content;
             
-            // Debug: Show current content
-            $this->line("\n📄 Current model content (first 500 chars):");
-            $this->line(substr($content, 0, 500) . "...");
+            // Use provided fields or default to email, phone
+            if (empty($fields)) {
+                $fields = ['email', 'phone'];
+            }
+            
+            $fieldsString = "['" . implode("', '", $fields) . "']";
             
             // Add trait import if missing
             $traitImport = 'use PalakRajput\\DataEncryption\\Models\\Trait\\HasEncryptedFields;';
             if (!str_contains($content, $traitImport)) {
-                $this->info("Adding trait import...");
                 if (str_contains($content, 'namespace ')) {
                     $content = preg_replace(
                         '/(namespace [^;]+;)/',
@@ -283,7 +341,6 @@ class EncryptDataCommand extends Command
             
             // Add trait usage if missing
             if (!str_contains($content, 'use HasEncryptedFields;')) {
-                $this->info("Adding trait usage...");
                 if (preg_match('/(class\s+\w+\s+extends\s+[^{]+{)/', $content, $matches)) {
                     $classStart = $matches[1];
                     $content = str_replace(
@@ -303,8 +360,7 @@ class EncryptDataCommand extends Command
             
             // Add encrypted fields properties if missing
             if (!str_contains($content, 'protected static $encryptedFields')) {
-                $this->info("Adding encrypted fields properties...");
-                $properties = "\n    protected static \$encryptedFields = ['email', 'phone'];\n    protected static \$searchableHashFields = ['email', 'phone'];";
+                $properties = "\n    protected static \$encryptedFields = {$fieldsString};\n    protected static \$searchableHashFields = {$fieldsString};";
                 
                 if (str_contains($content, 'use HasEncryptedFields;')) {
                     $content = str_replace(
@@ -343,10 +399,6 @@ class EncryptDataCommand extends Command
                 
                 File::put($modelPath, $content);
                 
-                // Debug: Show updated content
-                $this->line("\n📄 Updated model content (first 500 chars):");
-                $this->line(substr($content, 0, 500) . "...");
-                
                 // Clear opcache
                 if (function_exists('opcache_invalidate')) {
                     opcache_invalidate($modelPath, true);
@@ -360,7 +412,6 @@ class EncryptDataCommand extends Command
             
         } catch (\Exception $e) {
             $this->error("Error modifying model: " . $e->getMessage());
-            $this->error("Trace: " . $e->getTraceAsString());
             return false;
         }
     }
@@ -431,15 +482,10 @@ return new class extends Migration
             File::put($migrationFile, $migrationContent);
             $this->info("📄 Migration file created: " . basename($migrationFile));
             
-            // Show the migration content
-            $this->line("\n📋 Migration content:");
-            $this->line($migrationContent);
-            
             return true;
             
         } catch (\Exception $e) {
             $this->error("Migration creation failed: " . $e->getMessage());
-            $this->error("Trace: " . $e->getTraceAsString());
             return false;
         }
     }
