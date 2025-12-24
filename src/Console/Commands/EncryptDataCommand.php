@@ -188,29 +188,15 @@ class EncryptDataCommand extends Command
                 
                 // Ask to run migration
                 if ($this->confirm('Run the migration now?', true)) {
-                    try {
-                        $this->call('migrate');
-                        $this->info("✅ Migration executed!");
-                    } catch (\Exception $e) {
-                        // This catches the Doctrine DBAL error after migration
-                        $this->warn("⚠️ Migration completed but there was an error: " . $e->getMessage());
-                        $this->info("The migration likely succeeded. Continuing with encryption...");
-                    }
+                    $this->call('migrate');
                     
-                    // Wait a moment for database to update
-                    sleep(1);
+                    $this->info("✅ Migration executed!");
                     
-                    // Manually update existing columns list since schema refresh might fail
-                    foreach ($hashColumnsToAdd as $field => $columns) {
-                        if (!in_array($columns['hash'], $existingColumns)) {
-                            $existingColumns[] = $columns['hash'];
-                        }
-                        if (!in_array($columns['backup'], $existingColumns)) {
-                            $existingColumns[] = $columns['backup'];
-                        }
-                    }
+                    // Refresh schema cache
+                    Schema::getConnection()->getDoctrineSchemaManager()->getDatabasePlatform()->registerDoctrineTypeMapping('enum', 'string');
                     
-                    $this->info("✅ Assumed hash columns were added successfully");
+                    // Update existing columns after migration
+                    $existingColumns = Schema::getColumnListing($table);
                 } else {
                     $this->warn("⚠️  Migration created but not executed.");
                     $this->line("Run: php artisan migrate");
@@ -234,7 +220,6 @@ class EncryptDataCommand extends Command
         if (empty($fieldsToEncrypt)) {
             $this->warn("⚠️  No fields to encrypt or missing hash columns");
             $this->line("Make sure hash columns exist for: " . implode(', ', $encryptedFields));
-            $this->line("Available columns: " . implode(', ', $existingColumns));
             $this->line("Run migrations first or use --skip-migration to skip hash column check");
             return;
         }
