@@ -10,8 +10,6 @@ use PalakRajput\DataEncryption\Services\MeilisearchService;
 use PalakRajput\DataEncryption\Services\HashService;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Str;
-use Symfony\Component\Console\Input\ArrayInput;
-use Symfony\Component\Console\Output\BufferedOutput;
 
 class EncryptDataCommand extends Command
 {
@@ -21,8 +19,7 @@ class EncryptDataCommand extends Command
                         {--fields= : Comma-separated list of fields to encrypt}
                         {--chunk=1000 : Number of records to process at once}
                         {--force : Skip confirmation prompts}
-                        {--skip-migration : Skip creating migration for hash columns}
-                        {--skip-meilisearch : Skip Meilisearch indexing}';
+                        {--skip-migration : Skip creating migration for hash columns}';
     
     protected $description = 'Encrypt existing data in the database';
     
@@ -183,7 +180,6 @@ class EncryptDataCommand extends Command
         }
         
         // STEP 4: Create and run migration if needed
-        $migrationExecuted = false;
         if ($needsMigration && !$this->option('skip-migration')) {
             $this->info("📊 Creating migration for hash columns...");
             
@@ -192,28 +188,15 @@ class EncryptDataCommand extends Command
                 
                 // Ask to run migration
                 if ($this->confirm('Run the migration now?', true)) {
-                    try {
-                        // Run migration manually with try-catch
-                        $this->runMigrationSafely();
-                        $this->info("✅ Migration executed!");
-                        $migrationExecuted = true;
-                    } catch (\Exception $e) {
-                        $this->warn("⚠️ Migration may have completed but there was an error: " . $e->getMessage());
-                        $this->info("Assuming migration succeeded and continuing with encryption...");
-                        $migrationExecuted = true;
-                    }
+                    $this->call('migrate');
                     
-                    // Manually add the expected hash columns to our list
-                    foreach ($hashColumnsToAdd as $field => $columns) {
-                        if (!in_array($columns['hash'], $existingColumns)) {
-                            $existingColumns[] = $columns['hash'];
-                        }
-                        if (!in_array($columns['backup'], $existingColumns)) {
-                            $existingColumns[] = $columns['backup'];
-                        }
-                    }
+                    $this->info("✅ Migration executed!");
                     
-                    $this->info("✅ Assuming hash columns were added: " . implode(', ', array_column($hashColumnsToAdd, 'hash')));
+                    // Refresh schema cache
+                    Schema::getConnection()->getDoctrineSchemaManager()->getDatabasePlatform()->registerDoctrineTypeMapping('enum', 'string');
+                    
+                    // Update existing columns after migration
+                    $existingColumns = Schema::getColumnListing($table);
                 } else {
                     $this->warn("⚠️  Migration created but not executed.");
                     $this->line("Run: php artisan migrate");
@@ -237,7 +220,6 @@ class EncryptDataCommand extends Command
         if (empty($fieldsToEncrypt)) {
             $this->warn("⚠️  No fields to encrypt or missing hash columns");
             $this->line("Make sure hash columns exist for: " . implode(', ', $encryptedFields));
-            $this->line("Available columns: " . implode(', ', $existingColumns));
             $this->line("Run migrations first or use --skip-migration to skip hash column check");
             return;
         }
@@ -263,104 +245,29 @@ class EncryptDataCommand extends Command
         
         $this->info('✅ Data encryption completed!');
         
-        // STEP 9: Reindex to Meilisearch
-        $this->setupMeilisearchForModel($modelClass, $model);
-    }
-    
-    /**
-     * Setup Meilisearch for the model
-     */
-    protected function setupMeilisearchForModel(string $modelClass, $model)
-    {
-        if ($this->option('skip-meilisearch')) {
-            $this->info("\n⏭️ Skipping Meilisearch indexing as requested");
-            return;
-        }
-        
-        // Check if Meilisearch is enabled in config
-        $meilisearchEnabled = config('data-encryption.meilisearch.enabled', true);
-        
-        if (!$meilisearchEnabled) {
-            $this->warn("\n⚠️ Meilisearch is disabled in config. Enable it in config/data-encryption.php");
-            $this->line("Set 'meilisearch.enabled' => true");
-            return;
-        }
-        
-        // Check if model has the required method
-        if (!method_exists($model, 'getMeilisearchIndexName')) {
-            $this->warn("\n⚠️ Model {$modelClass} doesn't have getMeilisearchIndexName() method");
-            $this->line("Make sure HasEncryptedFields trait is properly added to the model");
-            return;
-        }
-        
+        // STEP 9: Reindex to Meilisearch (only if trait method exists)
         try {
-            $this->info("\n🔍 Setting up Meilisearch for encrypted data search...");
-            
-            // Check Meilisearch connection
-            $meilisearch = app(MeilisearchService::class);
-            $indexName = $model->getMeilisearchIndexName();
-            
-            $this->info("🔧 Initializing Meilisearch index: {$indexName}");
-            
-            if ($meilisearch->initializeIndex($indexName)) {
-                $this->info("✅ Meilisearch index '{$indexName}' configured!");
+            if (config('data-encryption.meilisearch.enabled', true) && method_exists($model, 'getMeilisearchIndexName')) {
+                $this->info("\n🔍 Indexing to Meilisearch for search...");
                 
-                // Reindex all records
-                $this->info("📊 Reindexing encrypted data to Meilisearch...");
+                $meilisearch = app(MeilisearchService::class);
+                $indexName = $model->getMeilisearchIndexName();
                 
-                $this->call('data-encryption:reindex', [
-                    '--model' => $modelClass,
-                    '--force' => true,
-                ]);
-                
-                $this->info("🎉 Meilisearch setup complete! Partial search is now enabled.");
-                $this->line("💡 Try searching for: gmail, user, @example.com, test");
+                if ($meilisearch->initializeIndex($indexName)) {
+                    $this->info("✅ Meilisearch index '{$indexName}' configured!");
+                    
+                    $this->call('data-encryption:reindex', [
+                        '--model' => $modelClass,
+                        '--force' => true,
+                    ]);
+                } else {
+                    $this->error("❌ Failed to configure Meilisearch index");
+                }
             } else {
-                $this->error("❌ Failed to configure Meilisearch index");
-                $this->warn("Make sure Meilisearch is running at: " . config('data-encryption.meilisearch.host', 'http://localhost:7700'));
-                $this->line("Run: php artisan data-encryption:install --auto (to setup Meilisearch)");
+                $this->info("\n⚠️ Meilisearch not enabled or model doesn't support Meilisearch indexing");
             }
-            
         } catch (\Exception $e) {
-            $this->warn("⚠️ Meilisearch setup failed: " . $e->getMessage());
-            $this->line("You can skip Meilisearch with: --skip-meilisearch");
-            $this->line("Or setup Meilisearch manually with: php artisan data-encryption:install");
-        }
-    }
-    
-    /**
-     * Safely run migration command with error handling
-     */
-    protected function runMigrationSafely()
-    {
-        // Create a buffered output to capture migration output
-        $output = new BufferedOutput();
-        
-        try {
-            // Get the migrate command
-            $migrateCommand = $this->getApplication()->find('migrate');
-            
-            // Create input arguments for migrate command
-            $input = new ArrayInput([]);
-            
-            // Run the command
-            $migrateCommand->run($input, $output);
-            
-            // Show migration output
-            $this->line($output->fetch());
-            
-        } catch (\Exception $e) {
-            // If we get here, the migrate command threw an exception
-            // but the migration might have still succeeded
-            $this->warn("Migration command threw exception: " . $e->getMessage());
-            
-            // Check if the migration actually ran by looking for our specific migration
-            $outputText = $output->fetch();
-            if (str_contains($outputText, 'DONE') || str_contains($outputText, 'Migrated:')) {
-                $this->info("Migration appears to have completed successfully despite the error.");
-            }
-            
-            // Don't rethrow - we want to continue
+            $this->warn("⚠️ Meilisearch indexing failed: " . $e->getMessage());
         }
     }
     
