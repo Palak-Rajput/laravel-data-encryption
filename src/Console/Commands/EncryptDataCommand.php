@@ -21,7 +21,8 @@ class EncryptDataCommand extends Command
                         {--fields= : Comma-separated list of fields to encrypt}
                         {--chunk=1000 : Number of records to process at once}
                         {--force : Skip confirmation prompts}
-                        {--skip-migration : Skip creating migration for hash columns}';
+                        {--skip-migration : Skip creating migration for hash columns}
+                        {--skip-meilisearch : Skip Meilisearch indexing}';
     
     protected $description = 'Encrypt existing data in the database';
     
@@ -262,29 +263,68 @@ class EncryptDataCommand extends Command
         
         $this->info('✅ Data encryption completed!');
         
-        // STEP 9: Reindex to Meilisearch (only if trait method exists)
+        // STEP 9: Reindex to Meilisearch
+        $this->setupMeilisearchForModel($modelClass, $model);
+    }
+    
+    /**
+     * Setup Meilisearch for the model
+     */
+    protected function setupMeilisearchForModel(string $modelClass, $model)
+    {
+        if ($this->option('skip-meilisearch')) {
+            $this->info("\n⏭️ Skipping Meilisearch indexing as requested");
+            return;
+        }
+        
+        // Check if Meilisearch is enabled in config
+        $meilisearchEnabled = config('data-encryption.meilisearch.enabled', true);
+        
+        if (!$meilisearchEnabled) {
+            $this->warn("\n⚠️ Meilisearch is disabled in config. Enable it in config/data-encryption.php");
+            $this->line("Set 'meilisearch.enabled' => true");
+            return;
+        }
+        
+        // Check if model has the required method
+        if (!method_exists($model, 'getMeilisearchIndexName')) {
+            $this->warn("\n⚠️ Model {$modelClass} doesn't have getMeilisearchIndexName() method");
+            $this->line("Make sure HasEncryptedFields trait is properly added to the model");
+            return;
+        }
+        
         try {
-            if (config('data-encryption.meilisearch.enabled', true) && method_exists($model, 'getMeilisearchIndexName')) {
-                $this->info("\n🔍 Indexing to Meilisearch for search...");
+            $this->info("\n🔍 Setting up Meilisearch for encrypted data search...");
+            
+            // Check Meilisearch connection
+            $meilisearch = app(MeilisearchService::class);
+            $indexName = $model->getMeilisearchIndexName();
+            
+            $this->info("🔧 Initializing Meilisearch index: {$indexName}");
+            
+            if ($meilisearch->initializeIndex($indexName)) {
+                $this->info("✅ Meilisearch index '{$indexName}' configured!");
                 
-                $meilisearch = app(MeilisearchService::class);
-                $indexName = $model->getMeilisearchIndexName();
+                // Reindex all records
+                $this->info("📊 Reindexing encrypted data to Meilisearch...");
                 
-                if ($meilisearch->initializeIndex($indexName)) {
-                    $this->info("✅ Meilisearch index '{$indexName}' configured!");
-                    
-                    $this->call('data-encryption:reindex', [
-                        '--model' => $modelClass,
-                        '--force' => true,
-                    ]);
-                } else {
-                    $this->error("❌ Failed to configure Meilisearch index");
-                }
+                $this->call('data-encryption:reindex', [
+                    '--model' => $modelClass,
+                    '--force' => true,
+                ]);
+                
+                $this->info("🎉 Meilisearch setup complete! Partial search is now enabled.");
+                $this->line("💡 Try searching for: gmail, user, @example.com, test");
             } else {
-                $this->info("\n⚠️ Meilisearch not enabled or model doesn't support Meilisearch indexing");
+                $this->error("❌ Failed to configure Meilisearch index");
+                $this->warn("Make sure Meilisearch is running at: " . config('data-encryption.meilisearch.host', 'http://localhost:7700'));
+                $this->line("Run: php artisan data-encryption:install --auto (to setup Meilisearch)");
             }
+            
         } catch (\Exception $e) {
-            $this->warn("⚠️ Meilisearch indexing failed: " . $e->getMessage());
+            $this->warn("⚠️ Meilisearch setup failed: " . $e->getMessage());
+            $this->line("You can skip Meilisearch with: --skip-meilisearch");
+            $this->line("Or setup Meilisearch manually with: php artisan data-encryption:install");
         }
     }
     
