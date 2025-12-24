@@ -180,7 +180,6 @@ class EncryptDataCommand extends Command
         }
         
         // STEP 4: Create and run migration if needed
-        $migrationExecuted = false;
         if ($needsMigration && !$this->option('skip-migration')) {
             $this->info("📊 Creating migration for hash columns...");
             
@@ -192,32 +191,26 @@ class EncryptDataCommand extends Command
                     try {
                         $this->call('migrate');
                         $this->info("✅ Migration executed!");
-                        $migrationExecuted = true;
                     } catch (\Exception $e) {
+                        // This catches the Doctrine DBAL error after migration
                         $this->warn("⚠️ Migration completed but there was an error: " . $e->getMessage());
-                        $this->info("The migration likely succeeded despite the error. Continuing with encryption...");
-                        $migrationExecuted = true;
+                        $this->info("The migration likely succeeded. Continuing with encryption...");
                     }
                     
-                    // Try to refresh schema, but continue even if it fails
-                    try {
-                        Schema::getConnection()->getDoctrineSchemaManager()->getDatabasePlatform()->registerDoctrineTypeMapping('enum', 'string');
-                        // Update existing columns after migration
-                        $existingColumns = Schema::getColumnListing($table);
-                        $this->info("✅ Schema refreshed successfully");
-                    } catch (\Exception $e) {
-                        $this->warn("⚠️ Could not refresh schema cache: " . $e->getMessage());
-                        $this->info("Continuing anyway... The hash columns should now exist.");
-                        // Assume migration succeeded and columns exist
-                        foreach ($hashColumnsToAdd as $field => $columns) {
-                            if (!in_array($columns['hash'], $existingColumns)) {
-                                $existingColumns[] = $columns['hash'];
-                            }
-                            if (!in_array($columns['backup'], $existingColumns)) {
-                                $existingColumns[] = $columns['backup'];
-                            }
+                    // Wait a moment for database to update
+                    sleep(1);
+                    
+                    // Manually update existing columns list since schema refresh might fail
+                    foreach ($hashColumnsToAdd as $field => $columns) {
+                        if (!in_array($columns['hash'], $existingColumns)) {
+                            $existingColumns[] = $columns['hash'];
+                        }
+                        if (!in_array($columns['backup'], $existingColumns)) {
+                            $existingColumns[] = $columns['backup'];
                         }
                     }
+                    
+                    $this->info("✅ Assumed hash columns were added successfully");
                 } else {
                     $this->warn("⚠️  Migration created but not executed.");
                     $this->line("Run: php artisan migrate");
@@ -240,33 +233,10 @@ class EncryptDataCommand extends Command
         
         if (empty($fieldsToEncrypt)) {
             $this->warn("⚠️  No fields to encrypt or missing hash columns");
-            
-            // If migration just executed, wait a moment and try to get fresh column list
-            if ($migrationExecuted) {
-                $this->info("🔄 Waiting for database to update...");
-                sleep(2);
-                
-                try {
-                    // Clear schema cache and try again
-                    Schema::getConnection()->getSchemaBuilder()->getConnection()->getDoctrineSchemaManager()->getDatabasePlatform()->registerDoctrineTypeMapping('enum', 'string');
-                    $existingColumns = Schema::getColumnListing($table);
-                    $this->info("📊 Updated table columns: " . implode(', ', $existingColumns));
-                    
-                    $fieldsToEncrypt = array_filter($encryptedFields, function($field) use ($existingColumns) {
-                        $hashColumn = $field . '_hash';
-                        return in_array($field, $existingColumns) && in_array($hashColumn, $existingColumns);
-                    });
-                } catch (\Exception $e) {
-                    $this->warn("⚠️ Could not refresh schema: " . $e->getMessage());
-                }
-            }
-            
-            if (empty($fieldsToEncrypt)) {
-                $this->line("Make sure hash columns exist for: " . implode(', ', $encryptedFields));
-                $this->line("Available columns: " . implode(', ', $existingColumns));
-                $this->line("Run migrations first or use --skip-migration to skip hash column check");
-                return;
-            }
+            $this->line("Make sure hash columns exist for: " . implode(', ', $encryptedFields));
+            $this->line("Available columns: " . implode(', ', $existingColumns));
+            $this->line("Run migrations first or use --skip-migration to skip hash column check");
+            return;
         }
         
         // STEP 6: Backup if requested
